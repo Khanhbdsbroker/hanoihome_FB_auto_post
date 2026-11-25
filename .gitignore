@@ -1,0 +1,6 @@
+﻿__pycache__/
+*.py[cod]
+app_data/
+fb_cache_data/
+fb_chrome_profile/
+*.log
