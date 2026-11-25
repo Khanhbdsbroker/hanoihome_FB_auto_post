@@ -7,6 +7,7 @@ echo.
 
 set "PROFILE_DIR=%~dp0app_data\fb_chrome_profile"
 if exist "E:\Cho Thuê Chung Cư\" set "PROFILE_DIR=E:\Cho Thuê Chung Cư\fb_chrome_profile"
+if exist "D:\Cho Thuê Chung Cư\" set "PROFILE_DIR=D:\Cho Thuê Chung Cư\fb_chrome_profile"
 if not exist "%PROFILE_DIR%" mkdir "%PROFILE_DIR%"
 
 set "CHROME_EXE=chrome.exe"

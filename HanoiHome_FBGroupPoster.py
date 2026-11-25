@@ -39,12 +39,15 @@ DEFAULT_SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?f
 
 DEFAULT_REPORT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1fVq7q7RB6qGI5PR1-8X24bP5EOqwAX52wcpeigb4gcw/edit?gid=0#gid=0"
 
-_LEGACY_DATA_DIR = Path(r"E:\Cho Thuê Chung Cư")
+_CANDIDATE_DATA_DIRS = [
+    Path(r"D:\Cho Thuê Chung Cư"),
+    Path(r"E:\Cho Thuê Chung Cư"),
+]
 APP_BASE_DIR = Path(__file__).resolve().parent
-DATA_BASE_DIR = _LEGACY_DATA_DIR if _LEGACY_DATA_DIR.exists() else (APP_BASE_DIR / "app_data")
+DATA_BASE_DIR = next((p for p in _CANDIDATE_DATA_DIRS if p.exists()), APP_BASE_DIR / "app_data")
 
-_legacy_img_dir = _LEGACY_DATA_DIR / "680 Tu Hoa"
-DEFAULT_IMAGE_DIR = str(_legacy_img_dir if _legacy_img_dir.exists() else APP_BASE_DIR)
+_default_img_cand = DATA_BASE_DIR / "680 Tu Hoa"
+DEFAULT_IMAGE_DIR = str(_default_img_cand if _default_img_cand.exists() else (DATA_BASE_DIR if DATA_BASE_DIR.exists() else APP_BASE_DIR))
 FB_CACHE_DIR = str(DATA_BASE_DIR / "fb_cache_data")
 FB_CHROME_PROFILE_DIR = str(DATA_BASE_DIR / "fb_chrome_profile")
 os.makedirs(FB_CACHE_DIR, exist_ok=True)
@@ -250,6 +253,35 @@ def format_report_building_short(building_addr):
     return mapping.get(b, b)
 
 
+def get_image_roots(fallback_root=None):
+    roots = []
+    for cand in [DATA_BASE_DIR, Path(r"D:\Cho Thuê Chung Cư"), Path(r"E:\Cho Thuê Chung Cư"), APP_BASE_DIR]:
+        if cand and Path(cand).exists() and Path(cand) not in roots:
+            roots.append(Path(cand))
+    if fallback_root:
+        fb = Path(fallback_root)
+        if fb.exists():
+            for cand in [fb, fb.parent]:
+                if cand.exists() and cand not in roots:
+                    roots.append(cand)
+    return roots
+
+
+def resolve_portable_path(raw_path_str, fallback_root=None):
+    p = Path(str(raw_path_str).strip())
+    if p.exists():
+        return p
+    s = str(raw_path_str).replace("/", "\\")
+    marker = "Cho Thuê Chung Cư\\"
+    if marker in s:
+        rel = s.split(marker, 1)[1].lstrip("\\")
+        for root in get_image_roots(fallback_root):
+            cand = root / rel
+            if cand.exists():
+                return cand
+    return p
+
+
 def resolve_room_image_dir(unit_id, building_name="", fallback_root=None):
     u = str(unit_id).strip()
     bld = str(building_name).strip()
@@ -262,14 +294,14 @@ def resolve_room_image_dir(unit_id, building_name="", fallback_root=None):
         if "|" in k:
             c_u, c_b = k.split("|", 1)
             if c_u == u_up and (not bld_up or c_b in bld_up or bld_up in c_b):
-                p = Path(p_str)
+                p = resolve_portable_path(p_str, fallback_root)
                 if p.exists():
                     return p
 
     for (r_unit, r_bld), path_str in ROOM_IMAGE_DIRS.items():
         if u.lower() == str(r_unit).strip().lower():
             if not bld or (r_bld.lower() in bld.lower() or bld.lower() in r_bld.lower()):
-                p = Path(path_str)
+                p = resolve_portable_path(path_str, fallback_root)
                 if p.exists():
                     return p
 
@@ -281,7 +313,7 @@ def resolve_room_image_dir(unit_id, building_name="", fallback_root=None):
             r_digits = re.findall(r"\d+", str(r_unit))
             if r_digits and r_digits[0] == u_num:
                 if not bld or (r_bld.lower() in bld.lower() or bld.lower() in r_bld.lower()):
-                    p = Path(path_str)
+                    p = resolve_portable_path(path_str, fallback_root)
                     if p.exists():
                         return p
 
@@ -291,7 +323,7 @@ def resolve_room_image_dir(unit_id, building_name="", fallback_root=None):
             matched_building = True
             root_paths = [root_item] if isinstance(root_item, (str, Path)) else root_item
             for r_str in root_paths:
-                root_p = Path(r_str)
+                root_p = resolve_portable_path(r_str, fallback_root)
                 if root_p.exists():
                     for item in root_p.iterdir():
                         if not item.is_dir():
