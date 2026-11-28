@@ -1668,17 +1668,17 @@ class FBGroupPosterApp:
 
         close_context_after = False
         p_instance = None
-        if context is None:
-            close_context_after = True
-            p_instance = sync_playwright().start()
-            context, _ = self._launch_fb_context(p_instance, FB_CHROME_PROFILE_DIR)
-
+        sheet_page = None
         active_acc = self.get_active_account()
         target_tab = get_account_sheet_tab_name(active_acc)
         acc_id = active_acc.get("id", "default")
 
-        sheet_page = context.new_page()
         try:
+            if context is None:
+                close_context_after = True
+                p_instance = sync_playwright().start()
+                context, _ = self._launch_fb_context(p_instance, FB_CHROME_PROFILE_DIR)
+            sheet_page = context.new_page()
             self.log(f"☁️ Đang mở Google Sheet để đồng bộ {len(self.clean_groups)} nhóm của '{active_acc.get('name')}' vào Tab '{target_tab}'...")
             sheet_page.goto(report_url, wait_until="domcontentloaded", timeout=45000)
             time.sleep(4.0)
@@ -1864,16 +1864,16 @@ class FBGroupPosterApp:
 
         close_context_after = False
         p_instance = None
-        if context is None:
-            close_context_after = True
-            p_instance = sync_playwright().start()
-            context, _ = self._launch_fb_context(p_instance, FB_CHROME_PROFILE_DIR)
-
+        sheet_page = None
         active_acc = self.get_active_account()
         target_tab = get_account_sheet_tab_name(active_acc)
 
-        sheet_page = context.new_page()
         try:
+            if context is None:
+                close_context_after = True
+                p_instance = sync_playwright().start()
+                context, _ = self._launch_fb_context(p_instance, FB_CHROME_PROFILE_DIR)
+            sheet_page = context.new_page()
             self.log(f"📥 Đang kết nối tới Google Sheet để đọc Tab '{target_tab}' cho '{active_acc.get('name')}'...")
             sheet_page.goto(report_url, wait_until="domcontentloaded", timeout=45000)
             time.sleep(4.0)
@@ -2340,9 +2340,10 @@ class FBGroupPosterApp:
                             context.close()
                         except Exception:
                             pass
-                    if joined_this_session > 0 or found_urls_to_append:
-                        self.log("☁️ Đang tự động lưu danh sách nhóm mới lên Google Drive...")
-                        self.sync_groups_to_google_sheet(context=None, silent=False)
+
+                if joined_this_session > 0 or found_urls_to_append:
+                    self.log("☁️ Đang tự động lưu danh sách nhóm mới lên Google Drive...")
+                    self.sync_groups_to_google_sheet(context=None, silent=False)
 
                 if found_urls_to_append:
                     def append_to_ui():
@@ -2986,20 +2987,21 @@ class FBGroupPosterApp:
 
         return True
 
-    def write_reports_to_google_sheet(self, context, records):
+    def write_reports_to_google_sheet(self, context, records, write_csv=True):
         if not records:
             return
 
         local_csv = Path(FB_CACHE_DIR) / "fb_post_reports.csv"
-        file_exists = local_csv.exists()
-        with open(local_csv, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f)
-            if not file_exists:
-                writer.writerow(["STT", "Tên Nhóm", "Bài Đăng", "Link", "Ngày đăng", "Status"])
-            for idx, r in enumerate(records, start=1):
-                clean_u = str(r.get("post_url", "")).split("?")[0]
-                clean_u = re.sub(r"/pending_posts(?:/.*)?/?$", "/", clean_u)
-                writer.writerow([idx, r["group_name"], r["post_label"], clean_u, r["date_str"], r["status"]])
+        if write_csv:
+            file_exists = local_csv.exists()
+            with open(local_csv, "a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(["STT", "Tên Nhóm", "Bài Đăng", "Link", "Ngày đăng", "Status"])
+                for idx, r in enumerate(records, start=1):
+                    clean_u = str(r.get("post_url", "")).split("?")[0]
+                    clean_u = re.sub(r"/pending_posts(?:/.*)?/?$", "/", clean_u)
+                    writer.writerow([idx, r["group_name"], r["post_label"], clean_u, r["date_str"], r["status"]])
 
         report_url = self.ent_report_sheet.get().strip()
         if not report_url or "docs.google.com/spreadsheets" not in report_url:
@@ -3009,12 +3011,13 @@ class FBGroupPosterApp:
         self.log(f"📊 Đang mở Google Sheet báo cáo để chèn {len(records)} dòng mới lên đầu bảng (Dòng 5, ngay trên bài cũ)...")
         close_context_after = False
         p_instance = None
-        if context is None:
-            close_context_after = True
-            p_instance = sync_playwright().start()
-            context, _ = self._launch_fb_context(p_instance, FB_CHROME_PROFILE_DIR)
-        sheet_page = context.new_page()
+        sheet_page = None
         try:
+            if context is None:
+                close_context_after = True
+                p_instance = sync_playwright().start()
+                context, _ = self._launch_fb_context(p_instance, FB_CHROME_PROFILE_DIR)
+            sheet_page = context.new_page()
             sheet_page.goto(report_url, wait_until="domcontentloaded", timeout=45000)
             time.sleep(5.0)
 
@@ -3209,6 +3212,7 @@ class FBGroupPosterApp:
 
         self.log(f"🌐 Mở Chrome cho '{active_acc['name']}' ({len(group_urls)} nhóm | Mẫu: {template_mode})...")
 
+        need_external_report = False
         with sync_playwright() as p:
             context, page = self._launch_fb_context(p, active_profile)
             idx = 0
@@ -3461,16 +3465,19 @@ class FBGroupPosterApp:
                         context.close()
                     except Exception:
                         pass
-                    self.log("📊 Dùng Profile chính đã lưu Google để tự động dán báo cáo lên Sheet...")
-                    self.write_reports_to_google_sheet(None, posted_records)
-                    self.sync_groups_to_google_sheet(context=None, silent=True)
+                    need_external_report = True
             else:
                 try:
                     context.close()
                 except Exception:
                     pass
 
-            self.log("🏁 Hoàn tất phiên đăng bài & phân loại nhóm Facebook Groups!")
+        if need_external_report:
+            self.log("📊 Dùng Profile chính đã lưu Google để tự động dán báo cáo lên Sheet...")
+            self.write_reports_to_google_sheet(None, posted_records)
+            self.sync_groups_to_google_sheet(context=None, silent=True)
+
+        self.log("🏁 Hoàn tất phiên đăng bài & phân loại nhóm Facebook Groups!")
 
     # ----------------- TỰ ĐỘNG DUYỆT NHÓM & ĐĂNG ĐỦ 10 BÀI BÁO CÁO (AN TOÀN) -----------------
     def get_candidate_rooms_for_auto(self):
@@ -3620,6 +3627,7 @@ class FBGroupPosterApp:
         self.log(f"📋 Căn đủ điều kiện: {len(candidate_rooms)} căn | Nhóm dự kiến: {len(group_pool)} nhóm | Mẫu: {template_mode}")
         self.log("=" * 65)
 
+        need_external_report = False
         try:
             with sync_playwright() as p:
                 context, page = self._launch_fb_context(p, resolve_account_profile_dir(active_acc))
@@ -3878,30 +3886,34 @@ class FBGroupPosterApp:
                         self.log(f"❌ Lỗi xử lý tại nhóm {group_url}: {e}")
                         continue
 
-                # Hoàn tất vòng lặp: Tự động ghi Sheet Báo Cáo (dùng profile chính nếu đang ở nick phụ)
+                # Hoàn tất vòng lặp đăng FB
                 if posted_records:
-                    self.log(f"📊 Đang tự động ghi {len(posted_records)} bài vừa đăng lên Google Sheet Báo Cáo...")
                     if active_acc.get("id") == "default":
+                        self.log(f"📊 Đang tự động ghi {len(posted_records)} bài vừa đăng lên Google Sheet Báo Cáo...")
                         self.write_reports_to_google_sheet(context, posted_records)
                         self.sync_groups_to_google_sheet(context=context, silent=True)
                         try:
                             context.close()
                         except Exception:
                             pass
+                        self.log(f"✅ ĐÃ TỰ ĐỘNG BÁO CÁO THÀNH CÔNG {len(posted_records)} LINK BÀI LÊN DÒNG 5 CỦA SHEET BÁO CÁO!")
                     else:
                         try:
                             context.close()
                         except Exception:
                             pass
-                        self.log("📊 Dùng Profile chính đã lưu Google để tự động dán báo cáo lên Sheet...")
-                        self.write_reports_to_google_sheet(None, posted_records)
-                        self.sync_groups_to_google_sheet(context=None, silent=True)
-                    self.log(f"✅ ĐÃ TỰ ĐỘNG BÁO CÁO THÀNH CÔNG {len(posted_records)} LINK BÀI LÊN DÒNG 5 CỦA SHEET BÁO CÁO!")
+                        need_external_report = True
                 else:
                     try:
                         context.close()
                     except Exception:
                         pass
+
+            if need_external_report and posted_records:
+                self.log(f"📊 Dùng Profile chính đã lưu Google để tự động dán {len(posted_records)} bài lên Sheet Báo Cáo...")
+                self.write_reports_to_google_sheet(None, posted_records)
+                self.sync_groups_to_google_sheet(context=None, silent=True)
+                self.log(f"✅ ĐÃ TỰ ĐỘNG BÁO CÁO THÀNH CÔNG {len(posted_records)} LINK BÀI LÊN DÒNG 5 CỦA SHEET BÁO CÁO!")
 
             if len(posted_records) >= TARGET_POSTED_COUNT:
                 self.log("=" * 65)
