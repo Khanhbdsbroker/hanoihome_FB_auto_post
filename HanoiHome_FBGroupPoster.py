@@ -1138,7 +1138,6 @@ class FBGroupPosterApp:
         profile_dir = resolve_account_profile_dir(acc)
 
         def worker():
-            self.is_posting = True
             try:
                 chrome_path = find_chrome_executable()
                 report_url = self.ent_report_sheet.get().strip() or DEFAULT_REPORT_SHEET_URL
@@ -1150,14 +1149,11 @@ class FBGroupPosterApp:
                     report_url
                 ]
                 proc = subprocess.Popen(cmd)
-                self.log(f"👉 Đã mở Chrome cho '{acc['name']}'! Bạn hãy đăng nhập Facebook (và Google nếu là nick chính) trên 2 tab đang mở.")
-                self.log("💡 Sau khi đăng nhập xong, chỉ cần ĐÓNG CỬA SỔ CHROME lại để lưu phiên.")
+                self.log(f"👉 Đã mở Chrome cho '{acc['name']}'! Đăng nhập FB xong bạn có thể đóng Chrome (hoặc bấm chạy tiếp trên app, app sẽ tự đóng gọn trình duyệt này).")
                 proc.wait()
-                self.log(f"✅ Đã lưu phiên đăng nhập cho '{acc['name']}'!")
+                self.log(f"✅ Đã đóng cửa sổ đăng nhập của '{acc['name']}' và lưu phiên vĩnh viễn.")
             except Exception as e:
                 self.log(f"❌ Lỗi mở Chrome đăng nhập: {e}")
-            finally:
-                self.is_posting = False
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1191,16 +1187,7 @@ class FBGroupPosterApp:
                 except Exception as e_url:
                     self.log(f"🔒 Sheet Báo Cáo yêu cầu đăng nhập Google ({e_url}) -> Đang đọc qua Chrome Profile...")
                     with sync_playwright() as p:
-                        ctx = p.chromium.launch_persistent_context(
-                            user_data_dir=FB_CHROME_PROFILE_DIR,
-                            channel="chrome",
-                            headless=False,
-                            viewport={"width": 1200, "height": 800},
-                            ignore_default_args=["--enable-automation"],
-                            args=["--disable-blink-features=AutomationControlled", "--disable-notifications"]
-                        )
-                        ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-                        pg = ctx.pages[0] if ctx.pages else ctx.new_page()
+                        ctx, pg = self._launch_fb_context(p, FB_CHROME_PROFILE_DIR, viewport={"width": 1200, "height": 800})
                         pg.goto(report_url, wait_until="domcontentloaded", timeout=45000)
                         time.sleep(3.0)
 
@@ -1282,16 +1269,7 @@ class FBGroupPosterApp:
                 if share_links_to_resolve:
                     self.log(f"🔎 Tìm thấy {len(share_links_to_resolve)} nhóm dùng link rút gọn (/share/p/...), đang mở trình duyệt phân giải link nhóm gốc...")
                     with sync_playwright() as p:
-                        context = p.chromium.launch_persistent_context(
-                            user_data_dir=FB_CHROME_PROFILE_DIR,
-                            channel="chrome",
-                            headless=False,
-                            viewport={"width": 1200, "height": 800},
-                            ignore_default_args=["--enable-automation"],
-                            args=["--disable-blink-features=AutomationControlled", "--disable-notifications"]
-                        )
-                        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-                        page = context.pages[0] if context.pages else context.new_page()
+                        context, page = self._launch_fb_context(p, FB_CHROME_PROFILE_DIR, viewport={"width": 1200, "height": 800})
                         for g_n, s_url, s_type, s_status in share_links_to_resolve[:12]:
                             try:
                                 m_set = re.search(r"set=g\.(\d+)", s_url)
@@ -1693,15 +1671,7 @@ class FBGroupPosterApp:
         if context is None:
             close_context_after = True
             p_instance = sync_playwright().start()
-            context = p_instance.chromium.launch_persistent_context(
-                user_data_dir=FB_CHROME_PROFILE_DIR,
-                channel="chrome",
-                headless=False,
-                viewport={"width": 1280, "height": 850},
-                ignore_default_args=["--enable-automation"],
-                args=["--disable-blink-features=AutomationControlled", "--disable-notifications"]
-            )
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+            context, _ = self._launch_fb_context(p_instance, FB_CHROME_PROFILE_DIR)
 
         active_acc = self.get_active_account()
         target_tab = get_account_sheet_tab_name(active_acc)
@@ -1897,15 +1867,7 @@ class FBGroupPosterApp:
         if context is None:
             close_context_after = True
             p_instance = sync_playwright().start()
-            context = p_instance.chromium.launch_persistent_context(
-                user_data_dir=FB_CHROME_PROFILE_DIR,
-                channel="chrome",
-                headless=False,
-                viewport={"width": 1280, "height": 850},
-                ignore_default_args=["--enable-automation"],
-                args=["--disable-blink-features=AutomationControlled", "--disable-notifications"]
-            )
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+            context, _ = self._launch_fb_context(p_instance, FB_CHROME_PROFILE_DIR)
 
         active_acc = self.get_active_account()
         target_tab = get_account_sheet_tab_name(active_acc)
@@ -2246,142 +2208,140 @@ class FBGroupPosterApp:
             try:
                 self.log(f"🔍 Bắt đầu quét & tham gia nhóm FB bằng '{active_acc['name']}' với từ khóa: {', '.join(keywords)} (Tối đa {max_join} nhóm)...")
                 with sync_playwright() as p:
-                    context = p.chromium.launch_persistent_context(
-                        user_data_dir=active_profile,
-                        channel="chrome",
-                        headless=False,
-                        viewport={"width": 1280, "height": 850},
-                        ignore_default_args=["--enable-automation"],
-                        args=["--disable-blink-features=AutomationControlled", "--disable-notifications"]
-                    )
-                    context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-                    page = context.pages[0] if context.pages else context.new_page()
-
-                    for kw in keywords:
-                        if joined_this_session >= max_join:
-                            break
-                        search_url = f"https://www.facebook.com/search/groups/?q={kw.replace(' ', '%20')}"
-                        self.log(f"🔎 Đang tìm kiếm từ khóa: '{kw}'...")
-                        page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
-                        time.sleep(random.uniform(3.5, 5.0))
-
-                        if "login" in page.url or page.locator("input[name='email']").count() > 0:
-                            self.log("🔐 Chưa đăng nhập Facebook! Mời bạn đăng nhập trên cửa sổ Chrome (chờ tối đa 180s)...")
-                            fb_logged_in = False
-                            for _ in range(180):
-                                if "login" not in page.url and page.locator("input[name='email']").count() == 0:
-                                    fb_logged_in = True
-                                    self.log("✅ Đã nhận diện đăng nhập Facebook thành công!")
-                                    time.sleep(2.0)
-                                    break
-                                time.sleep(1.0)
-                            if not fb_logged_in:
-                                self.log("⚠️ Hết thời gian chờ đăng nhập Facebook (180s). Bỏ qua phiên tìm kiếm.")
-                                break
-                            if "/search/groups/" not in page.url:
-                                page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
-                                time.sleep(3.0)
-
-                        for _ in range(2):
-                            page.mouse.wheel(0, 700)
-                            time.sleep(1.5)
-
-                        group_links = page.locator("a[href*='/groups/']").all()
-                        candidate_urls = []
-                        for a in group_links:
-                            try:
-                                href = a.get_attribute("href") or ""
-                                if "/groups/" in href and "/search/" not in href:
-                                    norm_u = normalize_group_base_url(href)
-                                    if norm_u not in candidate_urls and not norm_u.endswith("/groups/"):
-                                        candidate_urls.append(norm_u)
-                            except Exception:
-                                continue
-
-                        self.log(f"📌 Tìm thấy {len(candidate_urls)} nhóm tiềm năng cho từ khóa '{kw}'.")
-
-                        for g_url in candidate_urls:
+                    context, page = self._launch_fb_context(p, active_profile)
+                    try:
+                        for kw in keywords:
                             if joined_this_session >= max_join:
                                 break
-                            if g_url in self.joined_groups:
-                                continue
+                            search_url = f"https://www.facebook.com/search/groups/?q={kw.replace(' ', '%20')}"
+                            self.log(f"🔎 Đang mở trang tìm kiếm: {search_url}")
+                            page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+                            time.sleep(random.uniform(3.5, 5.0))
 
-                            try:
-                                self.log(f"➡️ Truy cập kiểm tra nhóm: {g_url}")
-                                page.goto(g_url, wait_until="domcontentloaded", timeout=40000)
-                                time.sleep(random.uniform(3.0, 4.5))
-
-                                g_name = g_url
-                                h1_loc = page.locator("h1 a, h1 span").first
-                                if h1_loc.count() > 0:
-                                    t_name = h1_loc.inner_text(timeout=2000).strip()
-                                    if t_name and "Facebook" not in t_name:
-                                        g_name = t_name
-
-                                join_btn = page.locator(
-                                    "div[role='button']:has-text('Tham gia nhóm'), "
-                                    "div[role='button']:has-text('Join group'), "
-                                    "div[role='button']:has-text('Join Group')"
-                                ).first
-
-                                if join_btn.count() > 0 and join_btn.is_visible():
-                                    join_btn.click()
+                            if "login" in page.url or page.locator("input[name='email']").count() > 0:
+                                self.log("🔐 Chưa đăng nhập Facebook! Mời bạn đăng nhập trên cửa sổ Chrome (chờ tối đa 180s)...")
+                                fb_logged_in = False
+                                for _ in range(180):
+                                    if "login" not in page.url and page.locator("input[name='email']").count() == 0:
+                                        fb_logged_in = True
+                                        self.log("✅ Đã nhận diện đăng nhập Facebook thành công!")
+                                        time.sleep(2.0)
+                                        break
+                                    time.sleep(1.0)
+                                if not fb_logged_in:
+                                    self.log("⚠️ Hết thời gian chờ đăng nhập Facebook (180s). Bỏ qua phiên tìm kiếm.")
+                                    break
+                                if "/search/groups/" not in page.url:
+                                    page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
                                     time.sleep(3.0)
 
-                                    question_dialog = page.locator("div[role='dialog']:has-text('Trả lời câu hỏi'), div[role='dialog']:has-text('Answer questions')").first
-                                    if question_dialog.count() > 0:
-                                        self.log(f"⚠️ Nhóm '{g_name}' yêu cầu trả lời câu hỏi kiểm duyệt -> Bỏ qua để tránh treo.")
-                                        close_btn = page.locator("div[role='dialog'] [aria-label='Đóng'], div[role='dialog'] [aria-label='Close']").first
-                                        if close_btn.count() > 0:
-                                            close_btn.click()
-                                        continue
+                            for _ in range(2):
+                                page.mouse.wheel(0, 700)
+                                time.sleep(1.5)
 
-                                    joined_this_session += 1
-                                    self.joined_groups.append(g_url)
-                                    self.save_json_list(self.get_active_joined_groups_file(), self.joined_groups)
-                                    found_urls_to_append.append(g_url)
-                                    self.log(f"✅ [{joined_this_session}/{max_join}] Đã gửi yêu cầu tham gia: {g_name} ({g_url})")
-                                    self.add_or_update_group(
-                                        g_url,
-                                        group_name=g_name,
-                                        group_type="PENDING",
-                                        last_status="Mới gửi yêu cầu tham gia",
-                                        member_status="⚪ Chờ duyệt TV",
-                                        note=f"Tự động tìm kiếm theo từ khóa '{kw}'",
-                                        silent=False
-                                    )
+                            skip_slugs = {"feed", "discover", "joins", "create", "search", "notifications", "settings", "categories"}
+                            group_links = page.locator("a[href*='/groups/']").all()
+                            candidate_urls = []
+                            for a in group_links:
+                                try:
+                                    href = a.get_attribute("href") or ""
+                                    if "/groups/" in href and "/search/" not in href:
+                                        m_slug = re.search(r"/groups/([^/?#]+)", href)
+                                        if m_slug and m_slug.group(1).lower() in skip_slugs:
+                                            continue
+                                        norm_u = normalize_group_base_url(href)
+                                        if norm_u not in candidate_urls and not norm_u.endswith("/groups/"):
+                                            candidate_urls.append(norm_u)
+                                except Exception:
+                                    continue
 
-                                    if joined_this_session < max_join:
-                                        wait_sec = random.randint(20, 35)
-                                        self.log(f"🛡️ Nghỉ {wait_sec}s trước khi tham gia nhóm tiếp theo...")
-                                        time.sleep(wait_sec)
-                                else:
-                                    composer_check = page.locator(
-                                        "div[role='button']:has-text('Bạn viết gì đi'), "
-                                        "div[role='button']:has-text('Write something')"
+                            self.log(f"📌 Tìm thấy {len(candidate_urls)} nhóm tiềm năng cho từ khóa '{kw}'.")
+
+                            for g_url in candidate_urls:
+                                if joined_this_session >= max_join:
+                                    break
+                                if g_url in self.joined_groups:
+                                    continue
+
+                                try:
+                                    self.log(f"➡️ Truy cập kiểm tra nhóm: {g_url}")
+                                    page.goto(g_url, wait_until="domcontentloaded", timeout=40000)
+                                    time.sleep(random.uniform(3.0, 4.5))
+
+                                    g_name = g_url
+                                    h1_loc = page.locator("h1 a, h1 span").first
+                                    if h1_loc.count() > 0:
+                                        t_name = h1_loc.inner_text(timeout=2000).strip()
+                                        if t_name and "Facebook" not in t_name:
+                                            g_name = t_name
+
+                                    join_btn = page.locator(
+                                        "div[role='button']:has-text('Tham gia nhóm'), "
+                                        "div[role='button']:has-text('Join group'), "
+                                        "div[role='button']:has-text('Join Group')"
                                     ).first
-                                    if composer_check.count() > 0:
-                                        self.log(f"ℹ️ Đã là thành viên sẵn của nhóm '{g_name}', thêm vào danh sách đăng.")
-                                        if g_url not in self.joined_groups:
-                                            self.joined_groups.append(g_url)
-                                            self.save_json_list(self.get_active_joined_groups_file(), self.joined_groups)
+
+                                    if join_btn.count() > 0 and join_btn.is_visible():
+                                        join_btn.click()
+                                        time.sleep(3.0)
+
+                                        question_dialog = page.locator("div[role='dialog']:has-text('Trả lời câu hỏi'), div[role='dialog']:has-text('Answer questions')").first
+                                        if question_dialog.count() > 0:
+                                            self.log(f"⚠️ Nhóm '{g_name}' yêu cầu trả lời câu hỏi kiểm duyệt -> Bỏ qua để tránh treo.")
+                                            close_btn = page.locator("div[role='dialog'] [aria-label='Đóng'], div[role='dialog'] [aria-label='Close']").first
+                                            if close_btn.count() > 0:
+                                                close_btn.click()
+                                            continue
+
+                                        joined_this_session += 1
+                                        self.joined_groups.append(g_url)
+                                        self.save_json_list(self.get_active_joined_groups_file(), self.joined_groups)
                                         found_urls_to_append.append(g_url)
+                                        self.log(f"✅ [{joined_this_session}/{max_join}] Đã gửi yêu cầu tham gia: {g_name} ({g_url})")
                                         self.add_or_update_group(
                                             g_url,
                                             group_name=g_name,
-                                            group_type="INSTANT",
-                                            last_status="Đã là thành viên",
-                                            member_status="Đã tham gia",
-                                            note=f"Tự động quét theo từ khóa '{kw}'",
+                                            group_type="PENDING",
+                                            last_status="Mới gửi yêu cầu tham gia",
+                                            member_status="⚪ Chờ duyệt TV",
+                                            note=f"Tự động tìm kiếm theo từ khóa '{kw}'",
                                             silent=False
                                         )
-                            except Exception as e_grp:
-                                self.log(f"⚠️ Bỏ qua nhóm {g_url}: {e_grp}")
-                                continue
 
-                    context.close()
+                                        if joined_this_session < max_join:
+                                            wait_sec = random.randint(20, 35)
+                                            self.log(f"🛡️ Nghỉ {wait_sec}s trước khi tham gia nhóm tiếp theo...")
+                                            time.sleep(wait_sec)
+                                    else:
+                                        composer_check = page.locator(
+                                            "div[role='button']:has-text('Bạn viết gì đi'), "
+                                            "div[role='button']:has-text('Write something')"
+                                        ).first
+                                        if composer_check.count() > 0:
+                                            self.log(f"ℹ️ Đã là thành viên sẵn của nhóm '{g_name}', thêm vào danh sách đăng.")
+                                            if g_url not in self.joined_groups:
+                                                self.joined_groups.append(g_url)
+                                                self.save_json_list(self.get_active_joined_groups_file(), self.joined_groups)
+                                            found_urls_to_append.append(g_url)
+                                            self.add_or_update_group(
+                                                g_url,
+                                                group_name=g_name,
+                                                group_type="INSTANT",
+                                                last_status="Đã là thành viên",
+                                                member_status="Đã tham gia",
+                                                note=f"Tự động quét theo từ khóa '{kw}'",
+                                                silent=False
+                                            )
+                                except Exception as e_grp:
+                                    self.log(f"⚠️ Bỏ qua nhóm {g_url}: {e_grp}")
+                                    continue
+                    finally:
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
                     if joined_this_session > 0 or found_urls_to_append:
-                        self.log("☁️ Đang tự động lưu danh sách nhóm mới lên Tab 'Danh_Sach_Nhom' trên Google Drive...")
+                        self.log("☁️ Đang tự động lưu danh sách nhóm mới lên Google Drive...")
                         self.sync_groups_to_google_sheet(context=None, silent=False)
 
                 if found_urls_to_append:
@@ -3052,15 +3012,7 @@ class FBGroupPosterApp:
         if context is None:
             close_context_after = True
             p_instance = sync_playwright().start()
-            context = p_instance.chromium.launch_persistent_context(
-                user_data_dir=FB_CHROME_PROFILE_DIR,
-                channel="chrome",
-                headless=False,
-                viewport={"width": 1280, "height": 850},
-                ignore_default_args=["--enable-automation"],
-                args=["--disable-blink-features=AutomationControlled", "--disable-notifications"]
-            )
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+            context, _ = self._launch_fb_context(p_instance, FB_CHROME_PROFILE_DIR)
         sheet_page = context.new_page()
         try:
             sheet_page.goto(report_url, wait_until="domcontentloaded", timeout=45000)
@@ -3142,17 +3094,71 @@ class FBGroupPosterApp:
                 except Exception:
                     pass
 
-    def _launch_fb_context(self, playwright_inst, profile_dir):
+    def _release_profile_lock(self, profile_dir):
+        if sys.platform != "win32":
+            return
+        norm_target = os.path.normpath(str(profile_dir)).lower()
+        # Không bao giờ can thiệp vào profile Chrome mặc định của hệ thống
+        if "user data" in norm_target or len(norm_target) < 10:
+            return
+        try:
+            ps_script = (
+                "$t = $env:TARGET_PROFILE_DIR.ToLower(); "
+                "$procs = Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                "Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains($t) -and -not $_.CommandLine.Contains('--type=') }; "
+                "foreach ($p in $procs) { Write-Output $p.ProcessId }"
+            )
+            env = os.environ.copy()
+            env["TARGET_PROFILE_DIR"] = norm_target
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                capture_output=True, text=True, timeout=8, env=env, creationflags=flags
+            )
+            pids = [line.strip() for line in res.stdout.splitlines() if line.strip().isdigit()]
+            if pids:
+                self.log(f"⚠️ Phát hiện Chrome của '{Path(profile_dir).name}' đang mở sẵn -> Đang đóng gọn để chạy tự động...")
+                for pid in pids:
+                    subprocess.run(["taskkill", "/PID", pid], capture_output=True, timeout=5, creationflags=flags)
+                time.sleep(1.5)
+                res2 = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_script],
+                    capture_output=True, text=True, timeout=6, env=env, creationflags=flags
+                )
+                pids2 = [line.strip() for line in res2.stdout.splitlines() if line.strip().isdigit()]
+                for pid in pids2:
+                    subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], capture_output=True, timeout=5, creationflags=flags)
+                if pids2:
+                    time.sleep(1.0)
+        except Exception:
+            pass
+        for lock_name in ("lockfile", "SingletonLock", "SingletonCookie", "SingletonSocket"):
+            lp = Path(profile_dir) / lock_name
+            if lp.exists():
+                try:
+                    lp.unlink()
+                except Exception:
+                    pass
+
+    def _launch_fb_context(self, playwright_inst, profile_dir, viewport=None):
         os.makedirs(profile_dir, exist_ok=True)
+        self._release_profile_lock(profile_dir)
         ctx = playwright_inst.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
             channel="chrome",
             headless=False,
-            viewport={"width": 1280, "height": 850},
+            viewport=viewport or {"width": 1280, "height": 850},
             ignore_default_args=["--enable-automation"],
-            args=["--disable-blink-features=AutomationControlled", "--disable-notifications"]
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-notifications",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ]
         )
         ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+        if not ctx.pages:
+            time.sleep(0.5)
         pg = ctx.pages[0] if ctx.pages else ctx.new_page()
         return ctx, pg
 
