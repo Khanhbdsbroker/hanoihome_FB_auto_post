@@ -132,6 +132,27 @@ def resolve_account_profile_dir(acc):
     return str(p)
 
 
+def get_account_clean_groups_file(acc_id):
+    if not acc_id or acc_id == "default":
+        return CLEAN_GROUPS_FILE
+    return Path(FB_CACHE_DIR) / f"instant_approve_groups_{acc_id}.json"
+
+
+def get_account_joined_groups_file(acc_id):
+    if not acc_id or acc_id == "default":
+        return JOINED_GROUPS_FILE
+    return Path(FB_CACHE_DIR) / f"joined_groups_history_{acc_id}.json"
+
+
+def get_account_sheet_tab_name(acc):
+    if not acc or acc.get("id") == "default":
+        return "Danh_Sach_Nhom"
+    if acc.get("sheet_tab"):
+        return str(acc["sheet_tab"]).strip()
+    raw = re.sub(r"[^a-zA-Z0-9_]", "_", str(acc.get("id", "2")).replace("acc_", "")).strip("_")
+    return f"Danh_Sach_Nhom_{raw[:16] or '2'}"
+
+
 def detect_fb_account_restriction(page):
     try:
         texts = []
@@ -731,10 +752,11 @@ class FBGroupPosterApp:
         self.scheduled_posted_today = set()
         self.today_date = datetime.now().strftime("%Y-%m-%d")
 
-        self.clean_groups = self.load_json_list(CLEAN_GROUPS_FILE)
-        self.joined_groups = self.load_json_list(JOINED_GROUPS_FILE)
         self.hidden_rooms, self.hidden_buildings = load_hidden_rooms_config()
         self.accounts_cfg = load_fb_accounts_config()
+        active_acc_id = self.get_active_account().get("id", "default")
+        self.clean_groups = self.load_json_list(get_account_clean_groups_file(active_acc_id))
+        self.joined_groups = self.load_json_list(get_account_joined_groups_file(active_acc_id))
 
         self.setup_ui()
         self.refresh_accounts_ui()
@@ -852,7 +874,14 @@ class FBGroupPosterApp:
             text="📥 Tải Kho Nhóm từ Drive",
             command=self.trigger_pull_groups_from_drive
         )
-        self.btn_pull_groups_drive.pack(side="right", fill="x", expand=True, padx=(2, 0))
+        self.btn_pull_groups_drive.pack(side="left", fill="x", expand=True, padx=2)
+
+        self.btn_scan_joined_groups = ttk.Button(
+            drive_sync_bar,
+            text="🔎 Quét nhóm đã vào (FB)",
+            command=self.trigger_scan_joined_groups
+        )
+        self.btn_scan_joined_groups.pack(side="right", fill="x", expand=True, padx=(2, 0))
 
         paths_row = ttk.Frame(frame_config)
         paths_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=2)
@@ -1330,8 +1359,9 @@ class FBGroupPosterApp:
                 self.txt_clean_groups.insert("end", f"# {item['name']}", "tag_name")
             self.txt_clean_groups.insert("end", "\n")
 
+        acc_name = self.get_active_account().get("name", "Tài khoản chính")
         self.lbl_clean_count.config(
-            text=f"Đã lưu: {len(self.clean_groups)} nhóm ({instant_count} 🟢 Đăng ngay | {pending_count} 🟡 Chờ duyệt)"
+            text=f"[{acc_name}] {len(self.clean_groups)} nhóm ({instant_count} 🟢 Đăng ngay | {pending_count} 🟡 Chờ duyệt)"
         )
 
     def add_or_update_group(
@@ -1364,7 +1394,7 @@ class FBGroupPosterApp:
                     g["name"] = group_name
                 g["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                 if changed:
-                    self.save_json_list(CLEAN_GROUPS_FILE, self.clean_groups)
+                    self.save_json_list(self.get_active_clean_groups_file(), self.clean_groups)
                     if not silent:
                         self.root.after(0, self.refresh_clean_groups_display)
                 return False
@@ -1380,7 +1410,7 @@ class FBGroupPosterApp:
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "note": default_note
         })
-        self.save_json_list(CLEAN_GROUPS_FILE, self.clean_groups)
+        self.save_json_list(self.get_active_clean_groups_file(), self.clean_groups)
         if not silent:
             self.root.after(0, self.refresh_clean_groups_display)
             tag_name = "🟢 ĐĂNG NGAY" if group_type == "INSTANT" else "🟡 CHỜ DUYỆT"
@@ -1395,7 +1425,7 @@ class FBGroupPosterApp:
         before = len(self.clean_groups)
         self.clean_groups = [g for g in self.clean_groups if normalize_group_base_url(g["url"]) != base_url]
         if len(self.clean_groups) < before:
-            self.save_json_list(CLEAN_GROUPS_FILE, self.clean_groups)
+            self.save_json_list(self.get_active_clean_groups_file(), self.clean_groups)
             self.root.after(0, self.refresh_clean_groups_display)
 
     def copy_instant_groups_to_active(self):
@@ -1430,6 +1460,18 @@ class FBGroupPosterApp:
 
     def get_active_profile_dir(self):
         return resolve_account_profile_dir(self.get_active_account())
+
+    def get_active_clean_groups_file(self):
+        return get_account_clean_groups_file(self.get_active_account().get("id", "default"))
+
+    def get_active_joined_groups_file(self):
+        return get_account_joined_groups_file(self.get_active_account().get("id", "default"))
+
+    def load_active_account_groups(self):
+        acc_id = self.get_active_account().get("id", "default")
+        self.clean_groups = self.load_json_list(get_account_clean_groups_file(acc_id))
+        self.joined_groups = self.load_json_list(get_account_joined_groups_file(acc_id))
+        self.root.after(0, self.refresh_clean_groups_display)
 
     def get_next_ready_account(self, exclude_ids=None):
         exclude = set(exclude_ids or [])
@@ -1470,9 +1512,10 @@ class FBGroupPosterApp:
             return False
         self.accounts_cfg["active_id"] = acc_id
         save_fb_accounts_config(self.accounts_cfg)
+        self.load_active_account_groups()
         self.root.after(0, self.refresh_accounts_ui)
         if log_msg:
-            self.log(f"🔁 Đã chuyển sang tài khoản FB: '{target['name']}' (Profile: {resolve_account_profile_dir(target)})")
+            self.log(f"🔁 Đã chuyển sang tài khoản FB: '{target['name']}' (Kho nhóm riêng: {len(self.clean_groups)} nhóm)")
         return True
 
     def mark_account_limited(self, acc_id, reason=""):
@@ -1522,10 +1565,15 @@ class FBGroupPosterApp:
         clean_name = name.strip()
         slug = re.sub(r"[^a-z0-9]+", "_", unicodedata.normalize("NFD", clean_name.lower())).strip("_")
         acc_id = f"acc_{slug or 'fb'}_{int(time.time()) % 10000}"
+        used_tabs = {get_account_sheet_tab_name(a) for a in self.accounts_cfg.get("accounts", [])}
+        tab_num = 2
+        while f"Danh_Sach_Nhom_{tab_num}" in used_tabs:
+            tab_num += 1
         new_acc = {
             "id": acc_id,
             "name": clean_name,
             "folder": acc_id,
+            "sheet_tab": f"Danh_Sach_Nhom_{tab_num}",
             "status": "ready",
             "posts_today": 0,
             "last_date": _today_iso(),
@@ -1535,8 +1583,9 @@ class FBGroupPosterApp:
         self.accounts_cfg["accounts"].append(new_acc)
         self.accounts_cfg["active_id"] = acc_id
         save_fb_accounts_config(self.accounts_cfg)
+        self.load_active_account_groups()
         self.refresh_accounts_ui()
-        self.log(f"➕ Đã tạo tài khoản FB mới: '{clean_name}' (thư mục profile riêng biệt).")
+        self.log(f"➕ Đã tạo nick FB mới: '{clean_name}' (Profile riêng & Tab Sheet '{new_acc['sheet_tab']}').")
 
         if messagebox.askyesno(
             "Đăng nhập tài khoản mới",
@@ -1595,6 +1644,7 @@ class FBGroupPosterApp:
         self.accounts_cfg["accounts"] = [a for a in self.accounts_cfg["accounts"] if a.get("id") != acc["id"]]
         self.accounts_cfg["active_id"] = "default"
         save_fb_accounts_config(self.accounts_cfg)
+        self.load_active_account_groups()
         self.refresh_accounts_ui()
         self.log(f"🗑️ Đã gỡ '{acc['name']}' khỏi danh sách và quay về Tài khoản chính.")
 
@@ -1607,6 +1657,7 @@ class FBGroupPosterApp:
             getattr(self, "btn_pull_from_report", None),
             getattr(self, "btn_sync_groups_drive", None),
             getattr(self, "btn_pull_groups_drive", None),
+            getattr(self, "btn_scan_joined_groups", None),
             getattr(self, "btn_add_account", None),
             getattr(self, "btn_switch_account", None),
             getattr(self, "btn_unblock_account", None),
@@ -1652,9 +1703,13 @@ class FBGroupPosterApp:
             )
             context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
 
+        active_acc = self.get_active_account()
+        target_tab = get_account_sheet_tab_name(active_acc)
+        acc_id = active_acc.get("id", "default")
+
         sheet_page = context.new_page()
         try:
-            self.log(f"☁️ Đang mở Google Sheet để đồng bộ {len(self.clean_groups)} nhóm vào Tab 'Danh_Sach_Nhom'...")
+            self.log(f"☁️ Đang mở Google Sheet để đồng bộ {len(self.clean_groups)} nhóm của '{active_acc.get('name')}' vào Tab '{target_tab}'...")
             sheet_page.goto(report_url, wait_until="domcontentloaded", timeout=45000)
             time.sleep(4.0)
 
@@ -1672,24 +1727,27 @@ class FBGroupPosterApp:
                     self.log("⚠️ Hết thời gian chờ đăng nhập Google (180s). Bỏ qua đồng bộ nhóm lên Sheet.")
                     return False
 
-            # Tìm tab Danh_Sach_Nhom trên thanh tab
-            tab_info = sheet_page.evaluate("""() => {
+            # Tìm tab target_tab trên thanh tab (so khớp chính xác để không nhầm Danh_Sach_Nhom và Danh_Sach_Nhom_2)
+            tab_info = sheet_page.evaluate("""(targetTab) => {
                 const tabs = Array.from(document.querySelectorAll('.docs-sheet-tab'));
+                const targetLow = targetTab.toLowerCase();
                 for (const t of tabs) {
                     const txt = (t.innerText || '').trim();
-                    if (txt.includes('Danh_Sach_Nhom') || txt.includes('Danh Sách Nhóm') || txt.includes('Kho_Nhom')) {
+                    const low = txt.toLowerCase();
+                    const isDefaultAlias = (targetTab === 'Danh_Sach_Nhom') && (txt === 'Danh Sách Nhóm' || txt === 'Kho_Nhom');
+                    if (low === targetLow || isDefaultAlias) {
                         const r = t.getBoundingClientRect();
                         return { found: true, text: txt, x: r.x + r.width/2, y: r.y + r.height/2 };
                     }
                 }
                 return { found: false };
-            }""")
+            }""", target_tab)
 
             if tab_info.get("found"):
                 sheet_page.mouse.click(tab_info["x"], tab_info["y"])
                 time.sleep(2.5)
             else:
-                self.log("📑 Chưa có tab 'Danh_Sach_Nhom', đang tạo tab mới trên Google Sheet...")
+                self.log(f"📑 Chưa có tab '{target_tab}', đang tạo tab mới trên Google Sheet...")
                 add_btn_rect = sheet_page.evaluate("""() => {
                     const btn = document.querySelector('.docs-sheet-add-button, #add-sheet-button, div[aria-label*=\"Thêm trang tính\"], div[aria-label*=\"Add Sheet\"]');
                     if (btn) {
@@ -1716,21 +1774,25 @@ class FBGroupPosterApp:
                     sheet_page.mouse.dblclick(active_rect["x"], active_rect["y"])
                     time.sleep(0.5)
                     sheet_page.keyboard.press("Control+A")
-                    sheet_page.keyboard.type("Danh_Sach_Nhom")
+                    sheet_page.keyboard.type(target_tab)
                     sheet_page.keyboard.press("Enter")
                     time.sleep(2.0)
 
-            # KIỂM TRA BẢO MẬT TUYỆT ĐỐI: CHỈ THAO TÁC KHI TAB ĐANG CHỌN LÀ DANH_SACH_NHOM
+            # KIỂM TRA BẢO MẬT TUYỆT ĐỐI: CHỈ THAO TÁC KHI TAB ĐANG CHỌN ĐÚNG LÀ target_tab
             active_tab_name = sheet_page.evaluate("""() => {
                 const t = document.querySelector('.docs-sheet-active-tab');
                 return t ? t.innerText.trim() : '';
             }""")
 
-            if "Trang tính1" in active_tab_name or "Danh_Sach_Nhom" not in active_tab_name:
-                self.log(f"🛡️ CẢNH BÁO BẢO VỆ: Thẻ hiện tại là '{active_tab_name}' (không phải Danh_Sach_Nhom). HỦY THAO TÁC XÓA ĐỂ BẢO VỆ DỮ LIỆU CŨ!")
+            is_valid_tab = (
+                active_tab_name.strip().lower() == target_tab.lower()
+                or (target_tab == "Danh_Sach_Nhom" and active_tab_name.strip() in ("Danh Sách Nhóm", "Kho_Nhom"))
+            )
+            if "Trang tính1" in active_tab_name or not is_valid_tab:
+                self.log(f"🛡️ CẢNH BÁO BẢO VỆ: Thẻ hiện tại là '{active_tab_name}' (không phải '{target_tab}'). HỦY THAO TÁC XÓA ĐỂ BẢO VỆ DỮ LIỆU!")
                 return False
 
-            self.log(f"📑 Đã xác nhận an toàn trên tab '{active_tab_name}', tiến hành cập nhật bảng 30 nhóm...")
+            self.log(f"📑 Đã xác nhận an toàn trên tab '{active_tab_name}', tiến hành đồng bộ {len(self.clean_groups)} nhóm...")
 
             # Chọn ô A1
             name_box = sheet_page.locator("#t-name-box").first
@@ -1788,14 +1850,15 @@ class FBGroupPosterApp:
             sheet_page.keyboard.press("Control+V")
             time.sleep(2.5)
 
-            local_master_csv = Path(FB_CACHE_DIR) / "fb_groups_master.csv"
+            csv_name = "fb_groups_master.csv" if acc_id == "default" else f"fb_groups_master_{acc_id}.csv"
+            local_master_csv = Path(FB_CACHE_DIR) / csv_name
             with open(local_master_csv, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
                 writer.writerow(headers)
                 for line in tsv_lines[1:]:
                     writer.writerow(line.split("\t"))
 
-            self.log(f"✅ ĐÃ ĐỒNG BỘ XONG {len(sorted_groups)} NHÓM lên Tab 'Danh_Sach_Nhom' trên Google Drive! ({instant_n} 🟢 Đăng ngay | {pending_n} 🟡 Chờ duyệt)")
+            self.log(f"✅ ĐÃ ĐỒNG BỘ XONG {len(sorted_groups)} NHÓM lên Tab '{target_tab}' trên Google Drive! ({instant_n} 🟢 Đăng ngay | {pending_n} 🟡 Chờ duyệt)")
             return True
         except Exception as e:
             self.log(f"❌ Lỗi đồng bộ Kho Nhóm lên Google Sheet: {e}")
@@ -1844,9 +1907,12 @@ class FBGroupPosterApp:
             )
             context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
 
+        active_acc = self.get_active_account()
+        target_tab = get_account_sheet_tab_name(active_acc)
+
         sheet_page = context.new_page()
         try:
-            self.log("📥 Đang kết nối tới Google Sheet để đọc Tab 'Danh_Sach_Nhom'...")
+            self.log(f"📥 Đang kết nối tới Google Sheet để đọc Tab '{target_tab}' cho '{active_acc.get('name')}'...")
             sheet_page.goto(report_url, wait_until="domcontentloaded", timeout=45000)
             time.sleep(4.0)
 
@@ -1864,20 +1930,23 @@ class FBGroupPosterApp:
                     self.log("⚠️ Hết thời gian chờ đăng nhập Google (180s). Bỏ qua.")
                     return False
 
-            tab_info = sheet_page.evaluate("""() => {
+            tab_info = sheet_page.evaluate("""(targetTab) => {
                 const tabs = Array.from(document.querySelectorAll('.docs-sheet-tab'));
+                const targetLow = targetTab.toLowerCase();
                 for (const t of tabs) {
                     const txt = (t.innerText || '').trim();
-                    if (txt.includes('Danh_Sach_Nhom') || txt.includes('Danh Sách Nhóm') || txt.includes('Kho_Nhom')) {
+                    const low = txt.toLowerCase();
+                    const isDefaultAlias = (targetTab === 'Danh_Sach_Nhom') && (txt === 'Danh Sách Nhóm' || txt === 'Kho_Nhom');
+                    if (low === targetLow || isDefaultAlias) {
                         const r = t.getBoundingClientRect();
                         return { found: true, name: txt, x: r.x + r.width/2, y: r.y + r.height/2 };
                     }
                 }
                 return { found: false };
-            }""")
+            }""", target_tab)
 
             if not tab_info.get("found"):
-                self.log("ℹ️ Chưa tìm thấy Tab 'Danh_Sach_Nhom' trên Sheet này. Hãy bấm '☁️ Lưu Kho Nhóm lên Drive' để tạo Tab trước.")
+                self.log(f"ℹ️ Chưa tìm thấy Tab '{target_tab}' trên Sheet này. Hãy bấm '☁️ Lưu Kho Nhóm lên Drive' để tạo Tab cho nick này trước.")
                 return False
 
             sheet_page.mouse.click(tab_info["x"], tab_info["y"])
@@ -1887,7 +1956,7 @@ class FBGroupPosterApp:
             gid = m_gid.group(1) if m_gid else None
 
             if not gid or gid == "0":
-                self.log("⚠️ Không nhận diện được GID riêng của Tab 'Danh_Sach_Nhom'. Hủy tải để tránh nhầm sang Trang tính 1.")
+                self.log(f"⚠️ Không nhận diện được GID riêng của Tab '{target_tab}'. Hủy tải để tránh nhầm sang Trang tính 1.")
                 return False
 
             csv_url = f"https://docs.google.com/spreadsheets/d/{s_id}/export?format=csv&gid={gid}"
@@ -1898,12 +1967,12 @@ class FBGroupPosterApp:
             }""", csv_url)
 
             if not content:
-                self.log("❌ Không lấy được nội dung Tab 'Danh_Sach_Nhom'.")
+                self.log(f"❌ Không lấy được nội dung Tab '{target_tab}'.")
                 return False
 
             rows = list(csv.reader(io.StringIO(content)))
             if len(rows) < 2:
-                self.log("⚠️ Tab 'Danh_Sach_Nhom' hiện chưa có dữ liệu nhóm nào.")
+                self.log(f"⚠️ Tab '{target_tab}' hiện chưa có dữ liệu nhóm nào.")
                 return False
 
             loaded_count = 0
@@ -1935,12 +2004,12 @@ class FBGroupPosterApp:
                 )
                 loaded_count += 1
 
-            self.save_json_list(CLEAN_GROUPS_FILE, self.clean_groups)
+            self.save_json_list(self.get_active_clean_groups_file(), self.clean_groups)
             self.root.after(0, self.refresh_clean_groups_display)
 
             instant_count = sum(1 for g in self.clean_groups if g.get("type", "INSTANT") == "INSTANT")
             pending_count = sum(1 for g in self.clean_groups if g.get("type") == "PENDING")
-            self.log(f"✅ ĐÃ TẢI XONG {loaded_count} NHÓM TỪ GOOGLE DRIVE! Tổng hiện tại: {len(self.clean_groups)} nhóm ({instant_count} 🟢 Đăng ngay | {pending_count} 🟡 Chờ duyệt).")
+            self.log(f"✅ ĐÃ TẢI XONG {loaded_count} NHÓM TỪ TAB '{target_tab}'! Kho hiện tại: {len(self.clean_groups)} nhóm ({instant_count} 🟢 Đăng ngay | {pending_count} 🟡 Chờ duyệt).")
             return True
         except Exception as e:
             self.log(f"❌ Lỗi tải nhóm từ Google Sheet: {e}")
@@ -1987,6 +2056,106 @@ class FBGroupPosterApp:
             self.set_action_buttons_state("disabled")
             try:
                 self.pull_groups_from_groups_sheet()
+            finally:
+                self.is_posting = False
+                self.set_action_buttons_state("normal")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def trigger_scan_joined_groups(self):
+        if self.is_posting:
+            messagebox.showwarning("Đang bận", "Hệ thống đang thực hiện tác vụ trình duyệt. Vui lòng chờ hoàn tất.")
+            return
+
+        active_acc = self.get_active_account()
+        active_profile = resolve_account_profile_dir(active_acc)
+
+        def worker():
+            self.is_posting = True
+            self.set_action_buttons_state("disabled")
+            added_count = 0
+            found_total = 0
+            try:
+                self.log(f"🔎 Đang mở danh sách nhóm đã tham gia trên FB cho '{active_acc.get('name')}'...")
+                with sync_playwright() as p:
+                    context, page = self._launch_fb_context(p, active_profile)
+                    page.goto("https://www.facebook.com/groups/joins/", wait_until="domcontentloaded", timeout=45000)
+                    time.sleep(4.0)
+
+                    if "login" in page.url or page.locator("input[name='email']").count() > 0:
+                        self.log(f"🔐 Nick '{active_acc.get('name')}' chưa đăng nhập Facebook! Vui lòng đăng nhập trên Chrome (chờ tối đa 180s)...")
+                        fb_ok = False
+                        for _ in range(180):
+                            if "login" not in page.url and page.locator("input[name='email']").count() == 0:
+                                fb_ok = True
+                                self.log("✅ Đã nhận diện đăng nhập Facebook thành công!")
+                                time.sleep(2.5)
+                                break
+                            time.sleep(1.0)
+                        if not fb_ok:
+                            self.log("⚠️ Hết thời gian chờ đăng nhập Facebook (180s). Hủy quét nhóm.")
+                            context.close()
+                            return
+                        page.goto("https://www.facebook.com/groups/joins/", wait_until="domcontentloaded", timeout=45000)
+                        time.sleep(4.0)
+
+                    for _ in range(6):
+                        page.mouse.wheel(0, 1200)
+                        time.sleep(1.5)
+
+                    raw_links = page.evaluate("""() => {
+                        const res = [];
+                        const seen = new Set();
+                        const skipSlugs = new Set(['feed', 'discover', 'joins', 'create', 'search', 'notifications', 'settings', 'categories']);
+                        for (const a of document.querySelectorAll('a[href*="/groups/"]')) {
+                            const href = a.href || '';
+                            const m = href.match(/https?:\\/\\/(?:www\\.|m\\.)?facebook\\.com\\/groups\\/([^\\/?#]+)/i);
+                            if (!m) continue;
+                            const slug = m[1].toLowerCase();
+                            if (skipSlugs.has(slug)) continue;
+                            const norm = 'https://www.facebook.com/groups/' + m[1] + '/';
+                            const txt = (a.innerText || '').trim().split('\\n')[0].trim();
+                            if (!seen.has(norm)) {
+                                seen.add(norm);
+                                res.push({ url: norm, name: txt });
+                            }
+                        }
+                        return res;
+                    }""")
+
+                    context.close()
+
+                existing_map = {normalize_group_base_url(g["url"]): g for g in self.clean_groups}
+                joined_file = self.get_active_joined_groups_file()
+                for item in raw_links or []:
+                    u = normalize_group_base_url(item.get("url", ""))
+                    nm = item.get("name", "") or u
+                    if not u:
+                        continue
+                    found_total += 1
+                    if u not in self.joined_groups:
+                        self.joined_groups.append(u)
+                    if u in existing_map:
+                        if nm and (not existing_map[u].get("name") or existing_map[u].get("name") == u):
+                            existing_map[u]["name"] = nm
+                    else:
+                        self.add_or_update_group(
+                            u,
+                            group_name=nm,
+                            group_type="PENDING",
+                            last_status="Đã vào sẵn (Chưa thử)",
+                            member_status="Đã là thành viên",
+                            note="Quét từ danh sách nhóm đã tham gia",
+                            silent=True
+                        )
+                        added_count += 1
+
+                self.save_json_list(self.get_active_clean_groups_file(), self.clean_groups)
+                self.save_json_list(joined_file, self.joined_groups)
+                self.root.after(0, self.refresh_clean_groups_display)
+                self.log(f"✅ Quét xong cho '{active_acc.get('name')}': Tìm thấy {found_total} nhóm đã tham gia, thêm mới {added_count} nhóm vào Kho Nhóm riêng!")
+            except Exception as e:
+                self.log(f"❌ Lỗi quét nhóm đã tham gia: {e}")
             finally:
                 self.is_posting = False
                 self.set_action_buttons_state("normal")
@@ -2042,7 +2211,7 @@ class FBGroupPosterApp:
                                     close_b.click()
                                 continue
                             self.joined_groups.append(norm_u)
-                            self.save_json_list(JOINED_GROUPS_FILE, self.joined_groups)
+                            self.save_json_list(self.get_active_joined_groups_file(), self.joined_groups)
                             self.log(f"🆕 Đã gửi yêu cầu tham gia nhóm thay thế mới: {norm_u}")
                             return norm_u
         except Exception as e:
@@ -2169,7 +2338,7 @@ class FBGroupPosterApp:
 
                                     joined_this_session += 1
                                     self.joined_groups.append(g_url)
-                                    self.save_json_list(JOINED_GROUPS_FILE, self.joined_groups)
+                                    self.save_json_list(self.get_active_joined_groups_file(), self.joined_groups)
                                     found_urls_to_append.append(g_url)
                                     self.log(f"✅ [{joined_this_session}/{max_join}] Đã gửi yêu cầu tham gia: {g_name} ({g_url})")
                                     self.add_or_update_group(
@@ -2195,7 +2364,7 @@ class FBGroupPosterApp:
                                         self.log(f"ℹ️ Đã là thành viên sẵn của nhóm '{g_name}', thêm vào danh sách đăng.")
                                         if g_url not in self.joined_groups:
                                             self.joined_groups.append(g_url)
-                                            self.save_json_list(JOINED_GROUPS_FILE, self.joined_groups)
+                                            self.save_json_list(self.get_active_joined_groups_file(), self.joined_groups)
                                         found_urls_to_append.append(g_url)
                                         self.add_or_update_group(
                                             g_url,
@@ -3324,21 +3493,22 @@ class FBGroupPosterApp:
             candidates.append(r)
         return candidates
 
-    def get_auto_group_pool(self):
+    def get_auto_group_pool(self, prefer_account_cache_only=False):
         pool = []
         seen = set()
 
-        # 1. Nhóm từ ô danh sách hiện tại
-        raw_text = self.txt_groups.get("1.0", "end").strip()
-        for line in raw_text.splitlines():
-            l_clean = line.split("#")[0].strip()
-            if l_clean.startswith("http"):
-                norm = normalize_group_base_url(l_clean)
-                if norm and norm not in seen:
-                    pool.append(norm)
-                    seen.add(norm)
+        # 1. Nhóm từ ô danh sách hiện tại (bỏ qua nếu đang chuyển sang kho riêng của nick khác có sẵn nhóm)
+        if not prefer_account_cache_only:
+            raw_text = self.txt_groups.get("1.0", "end").strip()
+            for line in raw_text.splitlines():
+                l_clean = line.split("#")[0].strip()
+                if l_clean.startswith("http"):
+                    norm = normalize_group_base_url(l_clean)
+                    if norm and norm not in seen:
+                        pool.append(norm)
+                        seen.add(norm)
 
-        # 2. Bổ sung từ Kho nhóm sạch (Ưu tiên INSTANT -> PENDING)
+        # 2. Bổ sung từ Kho nhóm riêng của tài khoản đang dùng (Ưu tiên INSTANT -> PENDING)
         instant_list = []
         pending_list = []
         other_clean = []
@@ -3359,6 +3529,13 @@ class FBGroupPosterApp:
                 seen.add(norm)
 
         return pool
+
+    def _rebuild_pool_after_switch(self, posted_group_urls, acc_name):
+        new_pool = [g for g in self.get_auto_group_pool(prefer_account_cache_only=True) if g not in posted_group_urls]
+        if not new_pool:
+            new_pool = [g for g in self.get_auto_group_pool(prefer_account_cache_only=False) if g not in posted_group_urls]
+        self.log(f"📋 Đã nạp {len(new_pool)} nhóm từ Kho Nhóm riêng của '{acc_name}'!")
+        return new_pool, 0
 
     def trigger_auto_post_10(self):
         if self.is_posting:
@@ -3423,6 +3600,7 @@ class FBGroupPosterApp:
 
         TARGET_POSTED_COUNT = 10
         posted_records = []
+        posted_group_urls = set()
         room_cycle_idx = 0
         group_idx = 0
         template_mode = self.cmb_template.get()
@@ -3494,7 +3672,7 @@ class FBGroupPosterApp:
                                 p, context, page, active_acc, tried_ids, restriction
                             )
                             if switched:
-                                group_idx = max(0, group_idx - 1)
+                                group_pool, group_idx = self._rebuild_pool_after_switch(posted_group_urls, active_acc["name"])
                                 room_cycle_idx = max(0, room_cycle_idx - 1)
                                 continue
                             break
@@ -3564,7 +3742,7 @@ class FBGroupPosterApp:
                                     p, context, page, active_acc, tried_ids, restriction
                                 )
                                 if switched:
-                                    group_idx = max(0, group_idx - 1)
+                                    group_pool, group_idx = self._rebuild_pool_after_switch(posted_group_urls, active_acc["name"])
                                     room_cycle_idx = max(0, room_cycle_idx - 1)
                                     continue
                                 break
@@ -3642,7 +3820,7 @@ class FBGroupPosterApp:
                                     p, context, page, active_acc, tried_ids, restriction
                                 )
                                 if switched:
-                                    group_idx = max(0, group_idx - 1)
+                                    group_pool, group_idx = self._rebuild_pool_after_switch(posted_group_urls, active_acc["name"])
                                     room_cycle_idx = max(0, room_cycle_idx - 1)
                                     continue
                                 break
@@ -3655,6 +3833,7 @@ class FBGroupPosterApp:
 
                         if p_status in ("Đã đăng", "Đang chờ phê duyệt"):
                             self.increment_account_post_count(active_acc["id"])
+                            posted_group_urls.add(normalize_group_base_url(group_url))
                             posted_records.append({
                                 "group_name": g_name,
                                 "post_label": post_label,
