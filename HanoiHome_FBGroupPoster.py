@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 import pyperclip
 from playwright.sync_api import sync_playwright
 
@@ -55,6 +55,106 @@ os.makedirs(FB_CHROME_PROFILE_DIR, exist_ok=True)
 
 CLEAN_GROUPS_FILE = Path(FB_CACHE_DIR) / "instant_approve_groups.json"
 JOINED_GROUPS_FILE = Path(FB_CACHE_DIR) / "joined_groups_history.json"
+FB_PROFILES_ROOT = Path(DATA_BASE_DIR) / "fb_profiles"
+FB_ACCOUNTS_FILE = Path(FB_CACHE_DIR) / "fb_accounts.json"
+
+FB_RESTRICTION_PATTERNS = [
+    r"bạn tạm thời bị chặn",
+    r"tạm thời bị hạn chế",
+    r"tài khoản của bạn bị hạn chế",
+    r"chúng tôi đã hạn chế",
+    r"bạn đã bị chặn sử dụng tính năng này",
+    r"hành động này tạm thời bị chặn",
+    r"không thể đăng bài lúc này",
+    r"vi phạm tiêu chuẩn cộng đồng",
+    r"bài viết của bạn vi phạm",
+    r"temporarily blocked",
+    r"you['’]?re temporarily restricted",
+    r"restricted from posting",
+    r"account is restricted",
+    r"can['’]?t post right now",
+    r"goes against our community standards",
+    r"limit how often you can post",
+    r"we restrict certain activity",
+]
+
+
+def _today_iso():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_fb_accounts_config():
+    default_cfg = {
+        "active_id": "default",
+        "accounts": [
+            {
+                "id": "default",
+                "name": "Tài khoản chính",
+                "folder": "",
+                "status": "ready",
+                "posts_today": 0,
+                "last_date": _today_iso(),
+                "limited_note": "",
+            }
+        ],
+    }
+    if FB_ACCOUNTS_FILE.exists():
+        try:
+            data = json.loads(FB_ACCOUNTS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("accounts"), list) and data["accounts"]:
+                today = _today_iso()
+                for acc in data["accounts"]:
+                    if acc.get("last_date") != today:
+                        acc["posts_today"] = 0
+                        acc["last_date"] = today
+                if not any(a.get("id") == data.get("active_id") for a in data["accounts"]):
+                    data["active_id"] = data["accounts"][0]["id"]
+                return data
+        except Exception:
+            pass
+    return default_cfg
+
+
+def save_fb_accounts_config(data):
+    try:
+        FB_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        FB_ACCOUNTS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def resolve_account_profile_dir(acc):
+    if not acc or acc.get("id") == "default" or not acc.get("folder"):
+        p = Path(FB_CHROME_PROFILE_DIR)
+    else:
+        p = FB_PROFILES_ROOT / str(acc["folder"])
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p)
+
+
+def detect_fb_account_restriction(page):
+    try:
+        texts = []
+        for sel in ("div[role='dialog']", "div[role='alert']"):
+            loc = page.locator(sel)
+            cnt = min(loc.count(), 4)
+            for i in range(cnt):
+                try:
+                    t = loc.nth(i).inner_text(timeout=800)
+                    if t:
+                        texts.append(t)
+                except Exception:
+                    pass
+        if not texts:
+            return None
+        combined = " ".join(texts).lower()
+        for pat in FB_RESTRICTION_PATTERNS:
+            m = re.search(pat, combined, re.IGNORECASE)
+            if m:
+                return m.group(0)
+    except Exception:
+        pass
+    return None
 
 DEFAULT_FB_GROUPS = (
     "https://www.facebook.com/groups/chothuecanhotayho\n"
@@ -634,8 +734,10 @@ class FBGroupPosterApp:
         self.clean_groups = self.load_json_list(CLEAN_GROUPS_FILE)
         self.joined_groups = self.load_json_list(JOINED_GROUPS_FILE)
         self.hidden_rooms, self.hidden_buildings = load_hidden_rooms_config()
+        self.accounts_cfg = load_fb_accounts_config()
 
         self.setup_ui()
+        self.refresh_accounts_ui()
         self.refresh_clean_groups_display()
         self.process_log_queue()
         self.start_clock_thread()
@@ -774,8 +876,35 @@ class FBGroupPosterApp:
 
         frame_config.columnconfigure(1, weight=1)
 
-        frame_action = ttk.LabelFrame(self.root, text="🚀 Thao tác, Mẫu Quảng Cáo & Điều khiển Đăng Bài", padding=8)
+        frame_action = ttk.LabelFrame(self.root, text="🚀 Thao tác, Tài khoản FB & Điều khiển Đăng Bài", padding=8)
         frame_action.pack(fill="x", padx=12, pady=4)
+
+        account_row = ttk.Frame(frame_action)
+        account_row.pack(fill="x", pady=(0, 4))
+
+        ttk.Label(account_row, text="👤 Tài khoản FB:", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 4))
+        self.cmb_account = ttk.Combobox(account_row, state="readonly", width=36)
+        self.cmb_account.pack(side="left", padx=(0, 4))
+        self.cmb_account.bind("<<ComboboxSelected>>", self.on_account_select)
+
+        self.btn_add_account = ttk.Button(account_row, text="➕ Thêm Nick FB", command=self.trigger_add_account)
+        self.btn_add_account.pack(side="left", padx=2)
+
+        self.btn_switch_account = ttk.Button(account_row, text="🔁 Đổi Nick khác", command=self.trigger_switch_next_account)
+        self.btn_switch_account.pack(side="left", padx=2)
+
+        self.btn_unblock_account = ttk.Button(account_row, text="♻️ Mở lại trạng thái", command=self.trigger_reset_account_status)
+        self.btn_unblock_account.pack(side="left", padx=2)
+
+        self.btn_del_account = ttk.Button(account_row, text="🗑️ Xóa Nick", command=self.trigger_delete_account)
+        self.btn_del_account.pack(side="left", padx=2)
+
+        self.chk_auto_switch_acc = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            account_row,
+            text="🔄 Tự đổi nick nếu bị giới hạn",
+            variable=self.chk_auto_switch_acc,
+        ).pack(side="right", padx=(4, 0))
 
         btn_row = ttk.Frame(frame_action)
         btn_row.pack(fill="x", pady=2)
@@ -976,23 +1105,26 @@ class FBGroupPosterApp:
             messagebox.showwarning("Đang xử lý", "Hệ thống đang chạy một tác vụ. Vui lòng chờ tác vụ hoàn tất.")
             return
 
+        acc = self.get_active_account()
+        profile_dir = resolve_account_profile_dir(acc)
+
         def worker():
             self.is_posting = True
             try:
                 chrome_path = find_chrome_executable()
                 report_url = self.ent_report_sheet.get().strip() or DEFAULT_REPORT_SHEET_URL
-                self.log("🌐 Đang mở Google Chrome nguyên bản (không dính cờ tự động hóa để tránh bị Google chặn)...")
+                self.log(f"🌐 Đang mở Chrome nguyên bản cho '{acc['name']}' (Profile: {profile_dir})...")
                 cmd = [
                     chrome_path,
-                    f"--user-data-dir={FB_CHROME_PROFILE_DIR}",
+                    f"--user-data-dir={profile_dir}",
                     "https://www.facebook.com",
                     report_url
                 ]
                 proc = subprocess.Popen(cmd)
-                self.log("👉 Đã mở Google Chrome! Bạn hãy thong thả đăng nhập Facebook và Google trên 2 tab đang mở.")
-                self.log("💡 Sau khi đăng nhập thành công cả 2 bên, bạn chỉ cần ĐÓNG CỬA SỔ CHROME lại.")
+                self.log(f"👉 Đã mở Chrome cho '{acc['name']}'! Bạn hãy đăng nhập Facebook (và Google nếu là nick chính) trên 2 tab đang mở.")
+                self.log("💡 Sau khi đăng nhập xong, chỉ cần ĐÓNG CỬA SỔ CHROME lại để lưu phiên.")
                 proc.wait()
-                self.log("✅ Đã ghi nhận đóng trình duyệt Chrome! Toàn bộ phiên đăng nhập đã được lưu vĩnh viễn.")
+                self.log(f"✅ Đã lưu phiên đăng nhập cho '{acc['name']}'!")
             except Exception as e:
                 self.log(f"❌ Lỗi mở Chrome đăng nhập: {e}")
             finally:
@@ -1287,6 +1419,185 @@ class FBGroupPosterApp:
     def copy_clean_groups_to_active(self):
         self.copy_instant_groups_to_active()
 
+    # ----------------- QUẢN LÝ ĐA TÀI KHOẢN FACEBOOK -----------------
+    def get_active_account(self):
+        accounts = self.accounts_cfg.get("accounts", [])
+        active_id = self.accounts_cfg.get("active_id", "default")
+        for acc in accounts:
+            if acc.get("id") == active_id:
+                return acc
+        return accounts[0] if accounts else {"id": "default", "name": "Tài khoản chính", "folder": "", "status": "ready", "posts_today": 0}
+
+    def get_active_profile_dir(self):
+        return resolve_account_profile_dir(self.get_active_account())
+
+    def get_next_ready_account(self, exclude_ids=None):
+        exclude = set(exclude_ids or [])
+        accounts = self.accounts_cfg.get("accounts", [])
+        if not accounts:
+            return None
+        active_id = self.accounts_cfg.get("active_id")
+        start_idx = next((i for i, a in enumerate(accounts) if a.get("id") == active_id), -1)
+        ordered = accounts[start_idx + 1:] + accounts[:start_idx + 1]
+        for acc in ordered:
+            if acc.get("id") not in exclude and acc.get("status", "ready") == "ready":
+                return acc
+        return None
+
+    @staticmethod
+    def format_account_label(acc):
+        today = _today_iso()
+        posts = acc.get("posts_today", 0) if acc.get("last_date") == today else 0
+        if acc.get("status") == "limited":
+            return f"🔴 {acc.get('name', acc.get('id'))} [Bị giới hạn] (Hôm nay: {posts} bài)"
+        return f"🟢 {acc.get('name', acc.get('id'))} (Hôm nay: {posts} bài)"
+
+    def refresh_accounts_ui(self):
+        if not hasattr(self, "cmb_account"):
+            return
+        accounts = self.accounts_cfg.get("accounts", [])
+        labels = [self.format_account_label(a) for a in accounts]
+        self.cmb_account["values"] = labels
+        active_id = self.accounts_cfg.get("active_id")
+        idx = next((i for i, a in enumerate(accounts) if a.get("id") == active_id), 0)
+        if labels:
+            self.cmb_account.current(idx)
+
+    def switch_to_account(self, acc_id, log_msg=True):
+        accounts = self.accounts_cfg.get("accounts", [])
+        target = next((a for a in accounts if a.get("id") == acc_id), None)
+        if not target:
+            return False
+        self.accounts_cfg["active_id"] = acc_id
+        save_fb_accounts_config(self.accounts_cfg)
+        self.root.after(0, self.refresh_accounts_ui)
+        if log_msg:
+            self.log(f"🔁 Đã chuyển sang tài khoản FB: '{target['name']}' (Profile: {resolve_account_profile_dir(target)})")
+        return True
+
+    def mark_account_limited(self, acc_id, reason=""):
+        for acc in self.accounts_cfg.get("accounts", []):
+            if acc.get("id") == acc_id:
+                acc["status"] = "limited"
+                acc["limited_note"] = f"{datetime.now().strftime('%H:%M %d/%m')} - {reason}".strip(" -")
+                break
+        save_fb_accounts_config(self.accounts_cfg)
+        self.root.after(0, self.refresh_accounts_ui)
+
+    def increment_account_post_count(self, acc_id):
+        today = _today_iso()
+        for acc in self.accounts_cfg.get("accounts", []):
+            if acc.get("id") == acc_id:
+                if acc.get("last_date") != today:
+                    acc["posts_today"] = 0
+                    acc["last_date"] = today
+                acc["posts_today"] = int(acc.get("posts_today", 0)) + 1
+                break
+        save_fb_accounts_config(self.accounts_cfg)
+        self.root.after(0, self.refresh_accounts_ui)
+
+    def on_account_select(self, event=None):
+        if self.is_posting:
+            messagebox.showwarning("Đang chạy", "Không thể đổi tài khoản khi trình duyệt đang chạy tác vụ.")
+            self.refresh_accounts_ui()
+            return
+        idx = self.cmb_account.current()
+        accounts = self.accounts_cfg.get("accounts", [])
+        if 0 <= idx < len(accounts):
+            acc = accounts[idx]
+            if acc.get("id") != self.accounts_cfg.get("active_id"):
+                self.switch_to_account(acc["id"], log_msg=True)
+
+    def trigger_add_account(self):
+        if self.is_posting:
+            messagebox.showwarning("Đang xử lý", "Vui lòng chờ tác vụ hiện tại xong trước khi thêm tài khoản mới.")
+            return
+        name = simpledialog.askstring(
+            "Thêm tài khoản Facebook mới",
+            "Nhập tên gợi nhớ cho nick FB mới (ví dụ: Nick 2 - Thu Hà, Nick phụ...):",
+            parent=self.root
+        )
+        if not name or not name.strip():
+            return
+        clean_name = name.strip()
+        slug = re.sub(r"[^a-z0-9]+", "_", unicodedata.normalize("NFD", clean_name.lower())).strip("_")
+        acc_id = f"acc_{slug or 'fb'}_{int(time.time()) % 10000}"
+        new_acc = {
+            "id": acc_id,
+            "name": clean_name,
+            "folder": acc_id,
+            "status": "ready",
+            "posts_today": 0,
+            "last_date": _today_iso(),
+            "limited_note": "",
+        }
+        resolve_account_profile_dir(new_acc)
+        self.accounts_cfg["accounts"].append(new_acc)
+        self.accounts_cfg["active_id"] = acc_id
+        save_fb_accounts_config(self.accounts_cfg)
+        self.refresh_accounts_ui()
+        self.log(f"➕ Đã tạo tài khoản FB mới: '{clean_name}' (thư mục profile riêng biệt).")
+
+        if messagebox.askyesno(
+            "Đăng nhập tài khoản mới",
+            f"Đã thêm '{clean_name}' và chuyển làm tài khoản đang dùng!\n\n"
+            f"Bạn có muốn mở Chrome ngay bây giờ để đăng nhập Facebook cho nick '{clean_name}' không?"
+        ):
+            self.trigger_open_login_browser()
+
+    def trigger_switch_next_account(self):
+        if self.is_posting:
+            messagebox.showwarning("Đang xử lý", "Hệ thống đang chạy tác vụ. Hãy đợi hoàn tất hoặc bấm Dừng trước khi đổi nick.")
+            return
+        accounts = self.accounts_cfg.get("accounts", [])
+        if len(accounts) <= 1:
+            messagebox.showinfo("Chưa có nick khác", "Bạn mới có 1 tài khoản. Bấm nút '➕ Thêm Nick FB' để thêm nick dự phòng.")
+            return
+        active_id = self.accounts_cfg.get("active_id")
+        next_acc = self.get_next_ready_account(exclude_ids={active_id})
+        if next_acc:
+            self.switch_to_account(next_acc["id"], log_msg=True)
+            return
+        # Nếu mọi nick khác đều đang đánh dấu bị giới hạn, chuyển tuần tự sang nick kế tiếp nếu user đồng ý
+        idx = next((i for i, a in enumerate(accounts) if a.get("id") == active_id), 0)
+        fallback_acc = accounts[(idx + 1) % len(accounts)]
+        if messagebox.askyesno(
+            "Các nick khác đều đang bị giới hạn",
+            f"Các nick còn lại hiện đều đang ở trạng thái 🔴 Bị giới hạn.\n"
+            f"Bạn vẫn muốn chuyển sang '{fallback_acc['name']}' chứ?"
+        ):
+            self.switch_to_account(fallback_acc["id"], log_msg=True)
+
+    def trigger_reset_account_status(self):
+        acc = self.get_active_account()
+        if acc.get("status") == "ready":
+            messagebox.showinfo("Trạng thái sẵn sàng", f"Nick '{acc['name']}' hiện đang ở trạng thái 🟢 Sẵn sàng.")
+            return
+        acc["status"] = "ready"
+        acc["limited_note"] = ""
+        save_fb_accounts_config(self.accounts_cfg)
+        self.refresh_accounts_ui()
+        self.log(f"♻️ Đã mở lại trạng thái 🟢 Sẵn sàng cho nick '{acc['name']}'.")
+
+    def trigger_delete_account(self):
+        if self.is_posting:
+            messagebox.showwarning("Đang xử lý", "Không thể xóa tài khoản khi đang chạy tác vụ.")
+            return
+        acc = self.get_active_account()
+        if acc.get("id") == "default":
+            messagebox.showwarning("Không thể xóa", "Không thể xóa 'Tài khoản chính (Mặc định)'.")
+            return
+        if not messagebox.askyesno(
+            "Xác nhận xóa nick",
+            f"Bạn có chắc muốn gỡ '{acc['name']}' khỏi danh sách tài khoản trên app?"
+        ):
+            return
+        self.accounts_cfg["accounts"] = [a for a in self.accounts_cfg["accounts"] if a.get("id") != acc["id"]]
+        self.accounts_cfg["active_id"] = "default"
+        save_fb_accounts_config(self.accounts_cfg)
+        self.refresh_accounts_ui()
+        self.log(f"🗑️ Đã gỡ '{acc['name']}' khỏi danh sách và quay về Tài khoản chính.")
+
     def set_action_buttons_state(self, state):
         btns = [
             getattr(self, "btn_post_selected", None),
@@ -1296,6 +1607,10 @@ class FBGroupPosterApp:
             getattr(self, "btn_pull_from_report", None),
             getattr(self, "btn_sync_groups_drive", None),
             getattr(self, "btn_pull_groups_drive", None),
+            getattr(self, "btn_add_account", None),
+            getattr(self, "btn_switch_account", None),
+            getattr(self, "btn_unblock_account", None),
+            getattr(self, "btn_del_account", None),
         ]
         for btn in btns:
             if btn is not None:
@@ -1303,6 +1618,11 @@ class FBGroupPosterApp:
                     btn.config(state=state)
                 except Exception:
                     pass
+        if hasattr(self, "cmb_account") and self.cmb_account is not None:
+            try:
+                self.cmb_account.config(state="disabled" if state == "disabled" else "readonly")
+            except Exception:
+                pass
 
     # ----------------- ĐỒNG BỘ KHO NHÓM LÊN TAB DANH_SACH_NHOM (GOOGLE DRIVE) -----------------
     def sync_groups_to_google_sheet(self, context=None, silent=False):
@@ -1751,12 +2071,14 @@ class FBGroupPosterApp:
             self.set_action_buttons_state("disabled")
             joined_this_session = 0
             found_urls_to_append = []
+            active_acc = self.get_active_account()
+            active_profile = resolve_account_profile_dir(active_acc)
 
             try:
-                self.log(f"🔍 Bắt đầu quét & tham gia nhóm FB với từ khóa: {', '.join(keywords)} (Tối đa {max_join} nhóm)...")
+                self.log(f"🔍 Bắt đầu quét & tham gia nhóm FB bằng '{active_acc['name']}' với từ khóa: {', '.join(keywords)} (Tối đa {max_join} nhóm)...")
                 with sync_playwright() as p:
                     context = p.chromium.launch_persistent_context(
-                        user_data_dir=FB_CHROME_PROFILE_DIR,
+                        user_data_dir=active_profile,
                         channel="chrome",
                         headless=False,
                         viewport={"width": 1280, "height": 850},
@@ -1888,11 +2210,10 @@ class FBGroupPosterApp:
                                 self.log(f"⚠️ Bỏ qua nhóm {g_url}: {e_grp}")
                                 continue
 
+                    context.close()
                     if joined_this_session > 0 or found_urls_to_append:
                         self.log("☁️ Đang tự động lưu danh sách nhóm mới lên Tab 'Danh_Sach_Nhom' trên Google Drive...")
-                        self.sync_groups_to_google_sheet(context=context, silent=False)
-
-                    context.close()
+                        self.sync_groups_to_google_sheet(context=None, silent=False)
 
                 if found_urls_to_append:
                     def append_to_ui():
@@ -2557,6 +2878,20 @@ class FBGroupPosterApp:
             return
 
         self.log(f"📊 Đang mở Google Sheet báo cáo để chèn {len(records)} dòng mới lên đầu bảng (Dòng 5, ngay trên bài cũ)...")
+        close_context_after = False
+        p_instance = None
+        if context is None:
+            close_context_after = True
+            p_instance = sync_playwright().start()
+            context = p_instance.chromium.launch_persistent_context(
+                user_data_dir=FB_CHROME_PROFILE_DIR,
+                channel="chrome",
+                headless=False,
+                viewport={"width": 1280, "height": 850},
+                ignore_default_args=["--enable-automation"],
+                args=["--disable-blink-features=AutomationControlled", "--disable-notifications"]
+            )
+            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         sheet_page = context.new_page()
         try:
             sheet_page.goto(report_url, wait_until="domcontentloaded", timeout=45000)
@@ -2628,6 +2963,51 @@ class FBGroupPosterApp:
                 sheet_page.close()
             except Exception:
                 pass
+            if close_context_after:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                try:
+                    p_instance.stop()
+                except Exception:
+                    pass
+
+    def _launch_fb_context(self, playwright_inst, profile_dir):
+        os.makedirs(profile_dir, exist_ok=True)
+        ctx = playwright_inst.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            channel="chrome",
+            headless=False,
+            viewport={"width": 1280, "height": 850},
+            ignore_default_args=["--enable-automation"],
+            args=["--disable-blink-features=AutomationControlled", "--disable-notifications"]
+        )
+        ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+        pg = ctx.pages[0] if ctx.pages else ctx.new_page()
+        return ctx, pg
+
+    def _handle_restriction_and_switch(self, playwright_inst, context, page, active_acc, tried_ids, reason):
+        acc_id = active_acc.get("id", "default")
+        self.mark_account_limited(acc_id, reason)
+        tried_ids.add(acc_id)
+        self.log(f"🚫 FB BÁO GIỚI HẠN / VI PHẠM trên nick '{active_acc.get('name')}': {reason}")
+        if not self.chk_auto_switch_acc.get():
+            self.log("⚠️ Đang tắt tự động đổi nick. Dừng phiên đăng bài để bảo vệ tài khoản.")
+            return False, active_acc, context, page
+        next_acc = self.get_next_ready_account(exclude_ids=tried_ids)
+        if not next_acc:
+            self.log("⚠️ Không còn nick dự phòng nào ở trạng thái 🟢 Sẵn sàng. Dừng phiên & lưu báo cáo hiện tại.")
+            return False, active_acc, context, page
+        self.log(f"🔁 Đang đóng trình duyệt cũ và tự động chuyển sang '{next_acc['name']}' để đăng tiếp...")
+        try:
+            context.close()
+        except Exception:
+            pass
+        time.sleep(3.0)
+        self.switch_to_account(next_acc["id"], log_msg=True)
+        new_ctx, new_pg = self._launch_fb_context(playwright_inst, resolve_account_profile_dir(next_acc))
+        return True, next_acc, new_ctx, new_pg
 
     # ----------------- AUTOMATION ENGINE: FACEBOOK GROUPS + KIỂM TRA BỊ KÍCH -----------------
     def execute_post_to_fb_groups(self, manual_preview_text, image_paths, room):
@@ -2638,40 +3018,35 @@ class FBGroupPosterApp:
             self.log("⚠️ Chưa nhập link Group Facebook nào hợp lệ (phải bắt đầu bằng https://).")
             return
 
-        os.makedirs(FB_CHROME_PROFILE_DIR, exist_ok=True)
+        active_acc = self.get_active_account()
+        active_profile = resolve_account_profile_dir(active_acc)
         auto_submit = self.chk_auto_click_post.get()
         auto_report = self.chk_auto_report.get()
         auto_rejoin = self.chk_auto_rejoin.get()
         template_mode = self.cmb_template.get()
         posted_records = []
+        tried_ids = set()
 
         short_bld = format_report_building_short(room.get("building", ""))
         area_tag = f" ({room['area']})" if room.get("area") else ""
         post_label = f"{room.get('unit', '').strip()} - {short_bld}{area_tag}".strip(" -")
         today_str = datetime.now().strftime("%d-%m-%Y").lstrip("0").replace("-0", "-")
 
-        self.log(f"🌐 Mở Chrome Profile riêng cho FB Groups ({len(group_urls)} nhóm | Mẫu: {template_mode})...")
+        self.log(f"🌐 Mở Chrome cho '{active_acc['name']}' ({len(group_urls)} nhóm | Mẫu: {template_mode})...")
 
         with sync_playwright() as p:
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=FB_CHROME_PROFILE_DIR,
-                channel="chrome",
-                headless=False,
-                viewport={"width": 1280, "height": 850},
-                ignore_default_args=["--enable-automation"],
-                args=["--disable-blink-features=AutomationControlled", "--disable-notifications"]
-            )
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-            page = context.pages[0] if context.pages else context.new_page()
-
-            for idx, group_url in enumerate(group_urls, start=1):
+            context, page = self._launch_fb_context(p, active_profile)
+            idx = 0
+            while idx < len(group_urls):
+                group_url = group_urls[idx]
+                idx += 1
                 try:
-                    self.log(f"➡️ [{idx}/{len(group_urls)}] Đang kiểm tra & mở nhóm: {group_url}")
+                    self.log(f"➡️ [{idx}/{len(group_urls)}] [{active_acc['name']}] Đang kiểm tra & mở nhóm: {group_url}")
                     page.goto(group_url, wait_until="domcontentloaded", timeout=45000)
                     time.sleep(random.uniform(3.5, 5.5))
 
                     if "login" in page.url or page.locator("input[name='email']").count() > 0:
-                        self.log("🔐 Chưa đăng nhập Facebook! Vui lòng đăng nhập trên cửa sổ Chrome vừa mở (chờ tối đa 180s)...")
+                        self.log(f"🔐 Nick '{active_acc['name']}' chưa đăng nhập Facebook! Vui lòng đăng nhập trên Chrome (chờ tối đa 180s)...")
                         fb_ok = False
                         for _ in range(180):
                             if "login" not in page.url and page.locator("input[name='email']").count() == 0:
@@ -2686,6 +3061,16 @@ class FBGroupPosterApp:
                         if "/groups/" not in page.url:
                             page.goto(group_url, wait_until="domcontentloaded", timeout=45000)
                             time.sleep(3.0)
+
+                    restriction = detect_fb_account_restriction(page)
+                    if restriction:
+                        switched, active_acc, context, page = self._handle_restriction_and_switch(
+                            p, context, page, active_acc, tried_ids, restriction
+                        )
+                        if switched:
+                            idx -= 1
+                            continue
+                        break
 
                     kicked_join_btn = page.locator(
                         "div[role='button']:has-text('Tham gia nhóm'), "
@@ -2705,8 +3090,11 @@ class FBGroupPosterApp:
                         continue
 
                     if kicked_join_btn.count() > 0 and kicked_join_btn.is_visible():
-                        self.log(f"⚠️ Phát hiện tài khoản đã bị kích ra khỏi nhóm: {group_url}!")
-                        self.remove_from_clean_groups(group_url)
+                        if active_acc.get("id") == "default":
+                            self.log(f"⚠️ Phát hiện tài khoản đã bị kích ra khỏi nhóm: {group_url}!")
+                            self.remove_from_clean_groups(group_url)
+                        else:
+                            self.log(f"⚠️ Nick '{active_acc['name']}' chưa tham gia nhóm {group_url} -> Bỏ qua.")
                         if auto_rejoin:
                             try:
                                 kicked_join_btn.click()
@@ -2753,6 +3141,15 @@ class FBGroupPosterApp:
                     ).first
 
                     if composer_btn.count() == 0:
+                        restriction = detect_fb_account_restriction(page)
+                        if restriction:
+                            switched, active_acc, context, page = self._handle_restriction_and_switch(
+                                p, context, page, active_acc, tried_ids, restriction
+                            )
+                            if switched:
+                                idx -= 1
+                                continue
+                            break
                         self.log(f"⏳ Nhóm {group_url} chưa mở khung đăng bài (có thể bị tắt quyền đăng hoặc chờ duyệt). Bỏ qua.")
                         continue
 
@@ -2820,6 +3217,16 @@ class FBGroupPosterApp:
                         except Exception:
                             pass
                         time.sleep(4.0)
+
+                        restriction = detect_fb_account_restriction(page)
+                        if restriction:
+                            switched, active_acc, context, page = self._handle_restriction_and_switch(
+                                p, context, page, active_acc, tried_ids, restriction
+                            )
+                            if switched:
+                                idx -= 1
+                                continue
+                            break
                     else:
                         self.log(f"📝 Đã điền sẵn bài & ảnh tại nhóm [{idx}]. Mời bạn kiểm tra và bấm Đăng trên Chrome (chờ 25s)...")
                         time.sleep(25)
@@ -2846,6 +3253,9 @@ class FBGroupPosterApp:
                             note="Bài đăng vào mục Chờ duyệt (Pending)"
                         )
 
+                    if p_status in ("Đã đăng", "Đang chờ phê duyệt"):
+                        self.increment_account_post_count(active_acc["id"])
+
                     posted_records.append({
                         "group_name": g_name,
                         "post_label": post_label,
@@ -2864,11 +3274,28 @@ class FBGroupPosterApp:
                     continue
 
             if auto_report and posted_records:
-                self.write_reports_to_google_sheet(context, posted_records)
-                self.sync_groups_to_google_sheet(context=context, silent=True)
+                if active_acc.get("id") == "default":
+                    self.write_reports_to_google_sheet(context, posted_records)
+                    self.sync_groups_to_google_sheet(context=context, silent=True)
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                    self.log("📊 Dùng Profile chính đã lưu Google để tự động dán báo cáo lên Sheet...")
+                    self.write_reports_to_google_sheet(None, posted_records)
+                    self.sync_groups_to_google_sheet(context=None, silent=True)
+            else:
+                try:
+                    context.close()
+                except Exception:
+                    pass
 
             self.log("🏁 Hoàn tất phiên đăng bài & phân loại nhóm Facebook Groups!")
-            context.close()
 
     # ----------------- TỰ ĐỘNG DUYỆT NHÓM & ĐĂNG ĐỦ 10 BÀI BÁO CÁO (AN TOÀN) -----------------
     def get_candidate_rooms_for_auto(self):
@@ -3001,24 +3428,17 @@ class FBGroupPosterApp:
         template_mode = self.cmb_template.get()
         auto_rejoin = self.chk_auto_rejoin.get()
         auto_submit = self.chk_auto_click_post.get()
+        active_acc = self.get_active_account()
+        tried_ids = set()
 
         self.log("=" * 65)
-        self.log(f"🎯 BẮT ĐẦU CHẾ ĐỘ TỰ ĐỘNG ĐĂNG ĐỦ 10 BÀI & BÁO CÁO")
+        self.log(f"🎯 BẮT ĐẦU CHẾ ĐỘ TỰ ĐỘNG ĐĂNG ĐỦ 10 BÀI & BÁO CÁO (Nick: {active_acc['name']})")
         self.log(f"📋 Căn đủ điều kiện: {len(candidate_rooms)} căn | Nhóm dự kiến: {len(group_pool)} nhóm | Mẫu: {template_mode}")
         self.log("=" * 65)
 
         try:
             with sync_playwright() as p:
-                context = p.chromium.launch_persistent_context(
-                    user_data_dir=FB_CHROME_PROFILE_DIR,
-                    channel="chrome",
-                    headless=False,
-                    viewport={"width": 1280, "height": 850},
-                    ignore_default_args=["--enable-automation"],
-                    args=["--disable-blink-features=AutomationControlled", "--disable-notifications"]
-                )
-                context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-                page = context.pages[0] if context.pages else context.new_page()
+                context, page = self._launch_fb_context(p, resolve_account_profile_dir(active_acc))
 
                 while group_idx < len(group_pool) and len(posted_records) < TARGET_POSTED_COUNT:
                     if self.stop_requested:
@@ -3037,10 +3457,10 @@ class FBGroupPosterApp:
                     today_str = datetime.now().strftime("%d-%m-%Y").lstrip("0").replace("-0", "-")
 
                     current_success = len(posted_records)
-                    self.log(f"➡️ [Tiến độ: {current_success}/{TARGET_POSTED_COUNT} bài] Duyệt nhóm [{group_idx}/{len(group_pool)}]: {group_url} | Chọn {post_label}")
+                    self.log(f"➡️ [Tiến độ: {current_success}/{TARGET_POSTED_COUNT} bài] [{active_acc['name']}] Duyệt nhóm [{group_idx}/{len(group_pool)}]: {group_url} | Chọn {post_label}")
                     if hasattr(self, "lbl_auto_progress"):
                         self.lbl_auto_progress.config(
-                            text=f"🎯 Tiến độ: {current_success}/{TARGET_POSTED_COUNT} bài | Đang duyệt nhóm {group_idx}/{len(group_pool)}"
+                            text=f"🎯 [{active_acc['name']}] Tiến độ: {current_success}/{TARGET_POSTED_COUNT} bài | Nhóm {group_idx}/{len(group_pool)}"
                         )
 
                     try:
@@ -3048,7 +3468,7 @@ class FBGroupPosterApp:
                         time.sleep(random.uniform(3.5, 5.0))
 
                         if "login" in page.url or page.locator("input[name='email']").count() > 0:
-                            self.log("🔐 Chưa đăng nhập Facebook! Vui lòng đăng nhập trên Chrome (chờ tối đa 120s)...")
+                            self.log(f"🔐 Nick '{active_acc['name']}' chưa đăng nhập Facebook! Vui lòng đăng nhập trên Chrome (chờ tối đa 120s)...")
                             fb_ok = False
                             for _ in range(120):
                                 if self.stop_requested:
@@ -3068,6 +3488,17 @@ class FBGroupPosterApp:
                                 page.goto(group_url, wait_until="domcontentloaded", timeout=45000)
                                 time.sleep(3.0)
 
+                        restriction = detect_fb_account_restriction(page)
+                        if restriction:
+                            switched, active_acc, context, page = self._handle_restriction_and_switch(
+                                p, context, page, active_acc, tried_ids, restriction
+                            )
+                            if switched:
+                                group_idx = max(0, group_idx - 1)
+                                room_cycle_idx = max(0, room_cycle_idx - 1)
+                                continue
+                            break
+
                         # Kiểm tra bị chặn
                         blocked_banner = page.locator("text=/nội dung này hiện không hiển thị|content isn't available|bị chặn|suspended/i").first
                         if blocked_banner.count() > 0:
@@ -3075,7 +3506,7 @@ class FBGroupPosterApp:
                             self.remove_from_clean_groups(group_url)
                             continue
 
-                        # Kiểm tra bị kích
+                        # Kiểm tra bị kích / chưa tham gia
                         kicked_join_btn = page.locator(
                             "div[role='button']:has-text('Tham gia nhóm'), "
                             "div[role='button']:has-text('Join group'), "
@@ -3085,8 +3516,11 @@ class FBGroupPosterApp:
                         ).first
 
                         if kicked_join_btn.count() > 0 and kicked_join_btn.is_visible():
-                            self.log(f"⚠️ Nhóm {group_url}: Tài khoản chưa vào nhóm hoặc đã bị kích.")
-                            self.remove_from_clean_groups(group_url)
+                            if active_acc.get("id") == "default":
+                                self.log(f"⚠️ Nhóm {group_url}: Tài khoản chính chưa vào nhóm hoặc đã bị kích.")
+                                self.remove_from_clean_groups(group_url)
+                            else:
+                                self.log(f"⚠️ Nick '{active_acc['name']}' chưa tham gia nhóm {group_url} -> Bỏ qua.")
                             if auto_rejoin:
                                 try:
                                     kicked_join_btn.click()
@@ -3124,6 +3558,16 @@ class FBGroupPosterApp:
                         ).first
 
                         if composer_btn.count() == 0:
+                            restriction = detect_fb_account_restriction(page)
+                            if restriction:
+                                switched, active_acc, context, page = self._handle_restriction_and_switch(
+                                    p, context, page, active_acc, tried_ids, restriction
+                                )
+                                if switched:
+                                    group_idx = max(0, group_idx - 1)
+                                    room_cycle_idx = max(0, room_cycle_idx - 1)
+                                    continue
+                                break
                             self.log(f"⏳ Nhóm {group_url} chưa mở khung đăng bài (chờ duyệt hoặc tắt đăng). Bỏ qua.")
                             continue
 
@@ -3191,6 +3635,17 @@ class FBGroupPosterApp:
                             except Exception:
                                 pass
                             time.sleep(4.0)
+
+                            restriction = detect_fb_account_restriction(page)
+                            if restriction:
+                                switched, active_acc, context, page = self._handle_restriction_and_switch(
+                                    p, context, page, active_acc, tried_ids, restriction
+                                )
+                                if switched:
+                                    group_idx = max(0, group_idx - 1)
+                                    room_cycle_idx = max(0, room_cycle_idx - 1)
+                                    continue
+                                break
                         else:
                             self.log(f"📝 Đã điền sẵn bài & ảnh tại nhóm [{group_idx}]. Mời bạn kiểm tra và bấm Đăng trên Chrome (chờ 25s)...")
                             time.sleep(25)
@@ -3199,6 +3654,7 @@ class FBGroupPosterApp:
                         g_name, p_url, p_status = self.extract_group_name_and_post_url(page, group_url, unit_id=current_room.get("unit", ""))
 
                         if p_status in ("Đã đăng", "Đang chờ phê duyệt"):
+                            self.increment_account_post_count(active_acc["id"])
                             posted_records.append({
                                 "group_name": g_name,
                                 "post_label": post_label,
@@ -3212,11 +3668,11 @@ class FBGroupPosterApp:
                             else:
                                 self.add_or_update_group(group_url, group_name=g_name, group_type="PENDING", last_status="Đang chờ phê duyệt", member_status="Đã là thành viên", note="Bài vào mục Chờ duyệt")
 
-                            self.log(f"🎉 [TIẾN ĐỘ THÀNH CÔNG: {len(posted_records)}/{TARGET_POSTED_COUNT} BÀI] {g_name} | {post_label} | {p_status} -> {p_url}")
+                            self.log(f"🎉 [TIẾN ĐỘ THÀNH CÔNG: {len(posted_records)}/{TARGET_POSTED_COUNT} BÀI] [{active_acc['name']}] {g_name} | {post_label} | {p_status} -> {p_url}")
 
                             if hasattr(self, "lbl_auto_progress"):
                                 self.lbl_auto_progress.config(
-                                    text=f"🎯 Tiến độ: Đã xong {len(posted_records)}/{TARGET_POSTED_COUNT} bài!"
+                                    text=f"🎯 [{active_acc['name']}] Đã xong {len(posted_records)}/{TARGET_POSTED_COUNT} bài!"
                                 )
 
                         # Nghỉ an toàn nếu chưa đạt đủ mục tiêu 10 bài và chưa bị dừng
@@ -3229,7 +3685,7 @@ class FBGroupPosterApp:
                                 if s % 10 == 0 or s <= 5:
                                     if hasattr(self, "status_bar"):
                                         self.status_bar.config(
-                                            text=f"🛡️ Nghỉ an toàn chống checkpoint: còn {s} giây (Tiến độ: {len(posted_records)}/{TARGET_POSTED_COUNT} bài)..."
+                                            text=f"🛡️ [{active_acc['name']}] Nghỉ an toàn: còn {s}s (Tiến độ: {len(posted_records)}/{TARGET_POSTED_COUNT} bài)..."
                                         )
                                 time.sleep(1.0)
 
@@ -3237,17 +3693,30 @@ class FBGroupPosterApp:
                         self.log(f"❌ Lỗi xử lý tại nhóm {group_url}: {e}")
                         continue
 
-                # Hoàn tất vòng lặp: Tự động ghi Sheet Báo Cáo
+                # Hoàn tất vòng lặp: Tự động ghi Sheet Báo Cáo (dùng profile chính nếu đang ở nick phụ)
                 if posted_records:
                     self.log(f"📊 Đang tự động ghi {len(posted_records)} bài vừa đăng lên Google Sheet Báo Cáo...")
-                    self.write_reports_to_google_sheet(context, posted_records)
-                    self.sync_groups_to_google_sheet(context=context, silent=True)
+                    if active_acc.get("id") == "default":
+                        self.write_reports_to_google_sheet(context, posted_records)
+                        self.sync_groups_to_google_sheet(context=context, silent=True)
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
+                        self.log("📊 Dùng Profile chính đã lưu Google để tự động dán báo cáo lên Sheet...")
+                        self.write_reports_to_google_sheet(None, posted_records)
+                        self.sync_groups_to_google_sheet(context=None, silent=True)
                     self.log(f"✅ ĐÃ TỰ ĐỘNG BÁO CÁO THÀNH CÔNG {len(posted_records)} LINK BÀI LÊN DÒNG 5 CỦA SHEET BÁO CÁO!")
-
-                try:
-                    context.close()
-                except Exception:
-                    pass
+                else:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
 
             if len(posted_records) >= TARGET_POSTED_COUNT:
                 self.log("=" * 65)
